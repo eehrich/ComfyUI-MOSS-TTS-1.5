@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+*.wav
+*.mp3
+*.safetensors
