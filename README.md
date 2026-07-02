@@ -105,14 +105,11 @@ Generates speech from `text` in the voice of `reference_audio`.
 
 ## Example workflow
 
-```
-┌────────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌────────────┐
-│ LoadAudio  ├──▶ │ MOSS-TTS Load    ├──▶ │ MOSS-TTS Voice   ├──▶ │ SaveAudio  │
-│ voice.wav  │    │ Model            │    │ Clone            │    └────────────┘
-└────────────┘    │  cuda / bf16     │    │  text = "..."    │
-                  └──────────────────┘    │  language = DE   │
-                                          └──────────────────┘
-```
+Wire it up in ComfyUI:
+
+- **`Load Audio`** → **`MOSS-TTS Voice Clone`** (`reference_audio` port)
+- **`MOSS-TTS Load Model`** → **`MOSS-TTS Voice Clone`** (`moss_model` port)
+- **`MOSS-TTS Voice Clone`** → **`Save Audio`** or **`Preview Audio`**
 
 Or as an inline demo:
 
