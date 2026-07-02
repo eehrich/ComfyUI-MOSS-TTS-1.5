@@ -243,12 +243,14 @@ class MOSSVoiceClone:
                     {
                         "default": 4096,
                         "min": 256,
-                        "max": 16384,
+                        "max": 65536,
                         "step": 128,
                         "tooltip": (
-                            "Upper bound on generated audio tokens. MOSS emits "
-                            "~12.5 tokens/second, so 4096 tokens gives about "
-                            "5 minutes of headroom. Raise for very long text."
+                            "Upper bound on generated audio tokens. MOSS has "
+                            "12 codebooks and runs at 12.5 frames/sec, so "
+                            "150 tokens = 1 s of audio. Default 4096 = ~27 s "
+                            "(fine for a sentence or two). Raise for longer "
+                            "text: 9000 = ~1 min, 45000 = ~5 min."
                         ),
                     },
                 ),
