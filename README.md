@@ -287,6 +287,18 @@ Load happens once per (model_id, device, dtype). Warm-cache generation is real-t
 
 VRAM: ~12 GB active weight + activations in `bfloat16` (measured on RTX 5090). Peak spikes with long contexts (e.g. very long text or `max_new_tokens=16384`) can push higher. RTX 3090 (24 GB) has comfortable headroom.
 
+**Reference / prev_audio adds runtime VRAM on top of the 12 GB baseline.** Voice Clone's `reference_audio` and Voice Continue's `previous_audio` are encoded to audio codes by the tokenizer, then held in the transformer's KV cache while the new frames are generated. The overhead scales linearly with the prefix duration:
+
+- At 12.5 fps × 12 codebooks = 150 audio tokens per second
+- MOSS-TTS-Local-Transformer-v1.5 has ~24 transformer layers × ~16 attention heads × 64 head_dim, storing K + V in bf16 → roughly **~50 KB of KV cache per audio token**
+- Empirically: **~1 GB extra VRAM per ~20 s of prefix audio** on a 1.7B setup, similar order of magnitude on 8B
+
+Practical implications:
+
+- **Very long reference audio** (e.g. a 2-minute calibration clip) at Voice Clone time can add several GB before generation even starts. Keep reference clips in the 5–15 s sweet spot.
+- **Voice Continue with a growing history** (chaining segment N as the prefix for segment N+1 with cumulative audio) is the biggest failure mode: VRAM drifts up linearly through a scene and eventually OOMs. If you are chaining segments, pass only the **last** segment's audio as `previous_audio` rather than the concatenation of the whole scene so far. The prefix-continuation semantics still work correctly (see [Voice Continue notes](#moss-tts-voice-continue) — MOSS aligns the prefix at the end of `previous_text` inside the concatenated full script), just with a shorter history.
+- Watch `nvidia-smi` during a long Continue chain to spot the drift early; a single-segment prefix stays flat at ~12 GB + a few hundred MB.
+
 ---
 
 ## Troubleshooting
