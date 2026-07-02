@@ -1,10 +1,11 @@
 # ComfyUI-MOSS-TTS-1.5
 
 ComfyUI custom nodes for [**MOSS-TTS-Local-Transformer-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) by [OpenMOSS](https://github.com/OpenMOSS).
-Four lean nodes for zero-shot voice cloning, deterministic duration steering, and audio continuation — no fine-tuning, no separate reference-transcript dance, just an audio reference and a target text.
+Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic duration steering, and audio continuation — no fine-tuning, no separate reference-transcript dance.
 
 - **31 languages** (with explicit language tag support)
 - **48 kHz stereo** output
+- **Reference-free synthesis** via a plain-text instruction ("male, warm, elderly narrator") — no reference audio needed
 - **Zero-shot voice cloning** from a single reference clip
 - **Hard duration control** via `target_tokens` (empirically verified — MOSS obeys it precisely)
 - **Continuation mode** — extend a previously generated clip in the same voice
@@ -16,7 +17,7 @@ The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
 
 ## Requirements
 
-- ComfyUI running on a machine with a CUDA GPU (~10 GB VRAM in `bfloat16`)
+- ComfyUI running on a machine with a CUDA GPU (~12 GB VRAM in `bfloat16`, measured on RTX 5090)
 - Python 3.10+
 - `transformers >= 5.0.0` (v5.5.x recommended; the same range MOSS's official code targets)
 - `torch`, `torchaudio` (whatever your ComfyUI already ships with)
@@ -68,7 +69,7 @@ Nothing behavioural changes — the real defaults still come from the class's `_
 
 ## Nodes
 
-All four nodes live under the top-level **`MOSS TTS 1.5`** category in the ComfyUI menu.
+All five nodes live under the top-level **`MOSS TTS 1.5`** category in the ComfyUI menu.
 
 ### `MOSS-TTS Load Model`
 
@@ -79,9 +80,29 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 |---|---|---|---|
 | `model_id` | STRING | `OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` | Any compatible Hugging Face repo id |
 | `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable |
-| `dtype` | `bfloat16` \| `float16` \| `float32` | `bfloat16` | `cpu` forces `float32` |
 
-**Output**: `MOSS_MODEL` — pass to Voice Clone or Voice Continue.
+`dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).
+
+**Output**: `MOSS_MODEL` — pass to any of the Speak / Voice Clone / Voice Continue nodes.
+
+### `MOSS-TTS Speak`
+
+Text-to-speech with no reference audio. MOSS uses its trained no-reference path (a literal `"None"` placeholder in the prompt) and picks a voice based on `language` + `instruction`. `instruction` is your only voice-steering knob here.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `moss_model` | MOSS_MODEL | — | From the loader |
+| `text` | STRING | `Hello, this is a test.` | Multiline |
+| `language` | enum | `English` | Also nudges MOSS toward a language-typical base voice |
+| `instruction` | STRING | `""` | Voice description — e.g. `"male, warm, elderly narrator"`, `"young female, cheerful, energetic"`, `"deep voice, dramatic, slow"`. Without it, MOSS picks whatever the training-data default was for the language. |
+| `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
+| `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
+| `audio_top_k` | INT | `25` | Top-k sampling |
+| `target_tokens` | INT | `0` | Target duration in audio frames (12.5 fps). `0` = model decides via EOS. |
+| `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames |
+| `seed` | INT | `42` | Random seed |
+
+**Outputs**: `audio` (48 kHz stereo) + `tokens_generated` (INT).
 
 ### `MOSS-TTS Voice Clone`
 
@@ -92,7 +113,7 @@ Generates speech from `text` in the voice of `reference_audio`.
 | `moss_model` | MOSS_MODEL | — | From the loader |
 | `reference_audio` | AUDIO | — | ComfyUI `AUDIO` type (`LoadAudio`, another node's output, etc.) |
 | `text` | STRING | `Hello, this is a test.` | Multiline |
-| `language` | enum | `English` | 31 supported: German, English, Chinese, Japanese, Korean, French, Spanish, Italian, and more (see [MOSS README](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5)) |
+| `language` | enum | `English` | Full 31-language list: Arabic, Cantonese, Chinese, Czech, Danish, Dutch, English, Finnish, French, German, Greek, Hebrew, Hindi, Hungarian, Italian, Japanese, Korean, Macedonian, Malay, Persian (Farsi), Polish, Portuguese, Romanian, Russian, Spanish, Swahili, Swedish, Tagalog, Thai, Turkish, Vietnamese. See [MOSS README](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) for language codes / flags. |
 | `instruction` | STRING | `""` | Optional free-form style/direction hint. **Not** a reference transcript — MOSS has no reference-text channel. |
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
@@ -108,20 +129,23 @@ Generates speech from `text` in the voice of `reference_audio`.
 
 ### `MOSS-TTS Voice Continue`
 
-Extends a previously generated MOSS clip: the model treats the input audio as the assistant's prior turn (`mode="continuation"`) and keeps talking. The voice comes from the input clip itself, so there's no separate reference audio.
+Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** model — it needs the *original text* that produced `previous_audio` so it can locate where in the script the audio stopped, then produce audio for the follow-up text. The node concatenates `previous_text + " " + text` internally and hands the full script + prior audio to MOSS. Voice is inherited from the prior audio (no separate reference).
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
 | `moss_model` | MOSS_MODEL | — | From the loader |
-| `previous_audio` | AUDIO | — | Prior MOSS output (typically another Voice Clone / Voice Continue node's `audio` output) |
-| `text` | STRING | `""` | Follow-up text. Empty is allowed → purely acoustic continuation. |
+| `previous_audio` | AUDIO | — | Prior MOSS output (typically another node's `audio` output) |
+| `previous_text` | STRING | `""` | **The exact text that produced `previous_audio`.** Word-for-word match matters — wrong prior text → garbled output (MOSS can't align its script position). |
+| `text` | STRING | `""` | Follow-up text to speak next. Empty is legal but produces near-instant EOS — supply real text. |
 | `language` | enum | `English` | Same list as Voice Clone |
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
 | `audio_top_k` | INT | `25` | Top-k sampling |
-| `target_tokens` | INT | `0` | Duration of the **new** segment in frames. `0` = model decides via EOS. |
+| `target_tokens` | INT | `0` | Duration of the **new** segment in frames. `0` = model decides via EOS. Internally the node adds `previous_tokens` (or measured prefix) before sending to MOSS, because MOSS reads its `tokens` hint as TOTAL (prefix + new) in continuation mode. |
 | `max_new_tokens` | INT | `4096` | Safety cap on the new segment |
 | `seed` | INT | `42` | Random seed |
+| `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). |
+| `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms). MOSS's decoder trims the prefix by sample proportion, and its 48 kHz conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
 
 **Outputs**: same shape as Voice Clone — `audio` (only the newly-generated segment, not concatenated with input) and `tokens_generated`.
 
@@ -178,11 +202,25 @@ Same audio reference, same seed, same text — but 40% slower / more dramatic. O
 **Continuation chain:**
 
 ```
-[LoadAudio] -> [Voice Clone] -> audio ─┐
-[part 1 text] -> Voice Clone.text      └─> [Voice Continue] -> [Save Audio]
-                                            ^        ^
-                                    [part 2 text]  [Estimate Tokens for part 2]
+[LoadAudio ref]  [Load Model]
+      \             /
+       > [Voice Clone] -> audio ─────────────┐
+[part 1 text] -> Voice Clone.text            │
+       [Voice Clone] -> tokens_generated ─┐  │
+                                          v  v
+[part 1 text] -------> Voice Continue.previous_text
+                       Voice Continue.previous_audio
+                       Voice Continue.previous_tokens (exact prefix len)
+[part 2 text] -------> Voice Continue.text
+[Estimate Tokens (part 2)] -> Voice Continue.target_tokens
+                                          │
+                                          v
+                             [Save Audio (part 2 only)]
 ```
+
+Route both the audio and the `tokens_generated` from the upstream node — the token count keeps the prefix length exact (no rounding drift). Voice Clone / Speak / Voice Continue all expose `tokens_generated` for this. Voice Continue sees `part 1 text` as the "you already said this" context, and adds `previous_tokens` to `target_tokens` internally before sending MOSS the total-length hint.
+
+For part 3, feed `part 1 + part 2` as the new `previous_text`, wire Voice Continue's own outputs forward, and so on.
 
 **Or as a standalone Python demo** (what the nodes wrap under the hood):
 
@@ -233,7 +271,7 @@ Measured on a single-turn 75-character German sentence, RTX 5090 (bf16):
 
 Load happens once per (model_id, device, dtype). Warm-cache generation is real-time on modern hardware.
 
-VRAM: ~10 GB active weight + activations in `bfloat16`. Peak spikes with long contexts (e.g. very long text or `max_new_tokens=16384`) can push higher. RTX 3090 (24 GB) has comfortable headroom.
+VRAM: ~12 GB active weight + activations in `bfloat16` (measured on RTX 5090). Peak spikes with long contexts (e.g. very long text or `max_new_tokens=16384`) can push higher. RTX 3090 (24 GB) has comfortable headroom.
 
 ---
 

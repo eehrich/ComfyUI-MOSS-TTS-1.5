@@ -1,10 +1,11 @@
 """ComfyUI nodes for OpenMOSS MOSS-TTS-Local-Transformer-v1.5.
 
-Four nodes:
-  - MOSSLoadModel:        loads the processor + model once, caches by (model_id, dtype, device).
+Five nodes:
+  - MOSSLoadModel:        loads the processor + model once, caches by (model_id, device).
+  - MOSSSpeak:            MOSS_MODEL + text (no reference) -> AUDIO in a MOSS default voice.
   - MOSSVoiceClone:       MOSS_MODEL + reference AUDIO + text -> cloned AUDIO out.
   - MOSSVoiceContinue:    MOSS_MODEL + previous AUDIO + follow-up text -> continuation AUDIO out.
-  - MOSSEstimateDuration: text -> (target_seconds, target_tokens) estimate for duration control.
+  - MOSSEstimateTokens:   text -> target_tokens estimate for duration control.
 
 ComfyUI AUDIO shape: {"waveform": Tensor[B, C, T], "sample_rate": int}. We convert to a
 temp WAV file for the MOSS processor (which takes file paths), then convert back on output.
@@ -24,19 +25,32 @@ import torchaudio
 logger = logging.getLogger("MOSS-TTS-ComfyUI")
 
 DEFAULT_MODEL_ID = "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5"
-DEFAULT_LANGUAGES = ("German", "English", "Chinese", "Japanese", "Korean", "French", "Spanish", "Italian")
+DEFAULT_LANGUAGES = (
+    "Arabic", "Cantonese", "Chinese", "Czech", "Danish", "Dutch", "English",
+    "Finnish", "French", "German", "Greek", "Hebrew", "Hindi", "Hungarian",
+    "Italian", "Japanese", "Korean", "Macedonian", "Malay", "Persian (Farsi)",
+    "Polish", "Portuguese", "Romanian", "Russian", "Spanish", "Swahili",
+    "Swedish", "Tagalog", "Thai", "Turkish", "Vietnamese",
+)
 MOSS_FRAMES_PER_SECOND = 12.5
 MOSS_SAMPLE_RATE = 48000
 
-_MODEL_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+_MODEL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
-def _load_bundle(model_id: str, device: str, dtype_name: str) -> dict[str, Any]:
-    key = (model_id, device, dtype_name)
+def _resolve_dtype(device: str) -> tuple[torch.dtype, str]:
+    """bf16 on CUDA (MOSS's training precision), fp32 on CPU (bf16 CPU kernels are patchy)."""
+    if device.startswith("cuda"):
+        return torch.bfloat16, "bfloat16"
+    return torch.float32, "float32"
+
+
+def _load_bundle(model_id: str, device: str) -> dict[str, Any]:
+    key = (model_id, device)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
 
-    dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[dtype_name]
+    dtype, dtype_name = _resolve_dtype(device)
 
     logger.info(f"[MOSS-TTS] loading processor '{model_id}' ...")
     from transformers import AutoModel, AutoProcessor
@@ -57,15 +71,17 @@ def _load_bundle(model_id: str, device: str, dtype_name: str) -> dict[str, Any]:
 class MOSSLoadModel:
     """Load and cache the MOSS-TTS processor + model.
 
-    The bundle is memoised by (model_id, device, dtype) so subsequent workflow
-    runs reuse the already-loaded weights with zero overhead.
+    The bundle is memoised by (model_id, device) so subsequent workflow
+    runs reuse the already-loaded weights with zero overhead. dtype is
+    resolved internally (bfloat16 on CUDA, float32 on CPU).
     """
 
     DESCRIPTION = (
         "Loads the MOSS-TTS-Local-Transformer processor + model. "
         "First execution downloads ~9 GB of weights into the Hugging Face cache "
         "and moves them to the selected device. Subsequent runs reuse the "
-        "cached bundle -> no re-load penalty."
+        "cached bundle -> no re-load penalty. dtype is picked automatically: "
+        "bfloat16 on CUDA (MOSS's training precision), float32 on CPU."
     )
 
     @classmethod
@@ -94,35 +110,20 @@ class MOSSLoadModel:
                         ),
                     },
                 ),
-                "dtype": (
-                    ["bfloat16", "float16", "float32"],
-                    {
-                        "default": "bfloat16",
-                        "tooltip": (
-                            "Weight precision. bfloat16 recommended on modern "
-                            "GPUs (Ampere+); use float16 on older cards, "
-                            "float32 for CPU. CPU always forces float32."
-                        ),
-                    },
-                ),
             },
         }
 
     RETURN_TYPES = ("MOSS_MODEL",)
     RETURN_NAMES = ("moss_model",)
-    OUTPUT_TOOLTIPS = ("Model bundle. Feed into MOSS-TTS Voice Clone or Voice Continue.",)
+    OUTPUT_TOOLTIPS = ("Model bundle. Feed into any MOSS-TTS Speak / Voice Clone / Voice Continue node.",)
     FUNCTION = "load"
     CATEGORY = "MOSS TTS 1.5"
 
-    def load(self, model_id: str, device: str, dtype: str):
-        # Fall back to cpu when CUDA is missing.
+    def load(self, model_id: str, device: str):
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("[MOSS-TTS] CUDA requested but not available; falling back to cpu.")
             device = "cpu"
-            if dtype != "float32":
-                logger.warning("[MOSS-TTS] cpu path forces dtype=float32.")
-                dtype = "float32"
-        bundle = _load_bundle(model_id, device, dtype)
+        bundle = _load_bundle(model_id, device)
         return (bundle,)
 
 
@@ -160,6 +161,220 @@ def _sanitize_target_tokens(target_tokens: int) -> int | None:
     if target_tokens and target_tokens > 0:
         return int(target_tokens)
     return None
+
+
+def _extract_audio(processor: Any, outputs: Any) -> torch.Tensor:
+    """Decode + pull the first audio tensor, with a clear error if MOSS returned nothing."""
+    decoded = processor.decode(outputs)
+    if not decoded or decoded[0] is None:
+        raise RuntimeError(
+            "MOSS returned no decodable audio (empty content in generation). "
+            "Try a different seed, longer text, or check the input for illegal chars."
+        )
+    codes = decoded[0].audio_codes_list
+    if not codes:
+        raise RuntimeError("MOSS returned an assistant message with empty audio_codes_list.")
+    return codes[0]
+
+
+class MOSSSpeak:
+    """Text-to-speech without a voice reference (MOSS's built-in 'None' voice path)."""
+
+    DESCRIPTION = (
+        "Generates speech without a reference audio. MOSS was trained on a "
+        "'None' placeholder path (see processing_moss_tts.py: else-branch of "
+        "_build_generation_or_voice_clone_codes) that lets it pick a voice "
+        "based on language + the 'instruction' hint. Since there is no audio "
+        "reference here, 'instruction' is the ONLY voice-steering knob -- "
+        "worth trying things like 'male, warm, elderly narrator' or 'young "
+        "female, cheerful, energetic'."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, Any]:
+        return {
+            "required": {
+                "moss_model": (
+                    "MOSS_MODEL",
+                    {"tooltip": "Model bundle produced by MOSS-TTS Load Model."},
+                ),
+                "text": (
+                    "STRING",
+                    {
+                        "default": "Hello, this is a test.",
+                        "multiline": True,
+                        "tooltip": (
+                            "Text to synthesize. For silence gaps use "
+                            "punctuation (., --, ...) or chain a follow-up "
+                            "run with an empty-audio spacer."
+                        ),
+                    },
+                ),
+                "language": (
+                    list(DEFAULT_LANGUAGES),
+                    {
+                        "default": "English",
+                        "tooltip": (
+                            "Language hint. Also nudges MOSS toward a "
+                            "language-typical base voice."
+                        ),
+                    },
+                ),
+                "instruction": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "placeholder": "Describe the voice (male/female, age, tone, style)",
+                        "tooltip": (
+                            "Voice description passed to MOSS's 'instruction' "
+                            "channel. Without a reference audio this is the "
+                            "only steering knob for voice character. Examples: "
+                            "'male, warm, elderly narrator', 'young female, "
+                            "cheerful', 'deep voice, dramatic, slow'."
+                        ),
+                    },
+                ),
+                "audio_temperature": (
+                    "FLOAT",
+                    {
+                        "default": 1.7,
+                        "min": 0.1,
+                        "max": 3.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "Sampling temperature. MOSS default is 1.7. "
+                            "Lower -> more deterministic and safer, higher -> "
+                            "more expressive but noisier."
+                        ),
+                    },
+                ),
+                "audio_top_p": (
+                    "FLOAT",
+                    {
+                        "default": 0.8,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "Nucleus (top-p) sampling cutoff.",
+                    },
+                ),
+                "audio_top_k": (
+                    "INT",
+                    {
+                        "default": 25,
+                        "min": 1,
+                        "max": 200,
+                        "step": 1,
+                        "tooltip": "Top-k sampling cutoff.",
+                    },
+                ),
+                "target_tokens": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 65536,
+                        "step": 1,
+                        "tooltip": (
+                            "Optional target duration hint, in audio frames. "
+                            "0 = disabled (model decides via EOS). At 12.5 "
+                            "frames/s: 375 tokens ~30 s, 750 ~60 s. Chain a "
+                            "MOSS-TTS Estimate Tokens node to compute this "
+                            "from the text."
+                        ),
+                    },
+                ),
+                "max_new_tokens": (
+                    "INT",
+                    {
+                        "default": 4096,
+                        "min": 256,
+                        "max": 65536,
+                        "step": 128,
+                        "tooltip": (
+                            "Safety cap on generated audio frames. MOSS runs "
+                            "at 12.5 frames/s, so the default 4096 caps output "
+                            "at ~5 min. The model stops on its own EOS token, "
+                            "so real output is usually much shorter."
+                        ),
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 42,
+                        "min": 0,
+                        "max": 0xFFFFFFFF,
+                        "tooltip": "Random seed. Same seed + same inputs -> identical output.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO", "INT")
+    RETURN_NAMES = ("audio", "tokens_generated")
+    OUTPUT_TOOLTIPS = (
+        "Generated audio at 48 kHz stereo, ready for SaveAudio / PreviewAudio.",
+        "Number of audio frames MOSS actually generated (frames, not samples). "
+        "At 12.5 fps this equals duration_seconds * 12.5.",
+    )
+    FUNCTION = "generate"
+    CATEGORY = "MOSS TTS 1.5"
+
+    def generate(
+        self,
+        moss_model: dict[str, Any],
+        text: str,
+        language: str,
+        instruction: str,
+        audio_temperature: float,
+        audio_top_p: float,
+        audio_top_k: int,
+        target_tokens: int,
+        max_new_tokens: int,
+        seed: int,
+    ) -> tuple[dict[str, Any], int]:
+        processor = moss_model["processor"]
+        model = moss_model["model"]
+        device = moss_model["device"]
+        _seed(device, seed)
+
+        build_kwargs: dict[str, Any] = {
+            "text": text.strip(),
+            "language": language,
+        }
+        if instruction.strip():
+            build_kwargs["instruction"] = instruction.strip()
+        tok_hint = _sanitize_target_tokens(target_tokens)
+        if tok_hint is not None:
+            build_kwargs["tokens"] = tok_hint
+
+        logger.info(
+            f"[MOSS-TTS] speak text_chars={len(build_kwargs['text'])} "
+            f"lang={language} instruction={'set' if instruction.strip() else 'none'} "
+            f"target_tokens={tok_hint or 'auto'} "
+            f"temperature={audio_temperature} top_p={audio_top_p} top_k={audio_top_k}"
+        )
+        conversation = [processor.build_user_message(**build_kwargs)]
+        batch = processor([conversation], mode="generation")
+
+        with torch.inference_mode():
+            outputs = model.generate(
+                input_ids=batch["input_ids"].to(device),
+                attention_mask=batch["attention_mask"].to(device),
+                max_new_tokens=int(max_new_tokens),
+                audio_temperature=float(audio_temperature),
+                audio_top_p=float(audio_top_p),
+                audio_top_k=int(audio_top_k),
+            )
+
+        audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
+        audio_dict, tokens_generated, seconds = _to_comfy_audio(audio_tensor)
+        logger.info(
+            f"[MOSS-TTS] speak done seconds={seconds:.2f} tokens_generated={tokens_generated}"
+        )
+        return (audio_dict, tokens_generated)
 
 
 class MOSSVoiceClone:
@@ -372,7 +587,7 @@ class MOSSVoiceClone:
                     audio_top_k=int(audio_top_k),
                 )
 
-            audio_tensor: torch.Tensor = processor.decode(outputs)[0].audio_codes_list[0]
+            audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
 
         audio_dict, tokens_generated, seconds = _to_comfy_audio(audio_tensor)
         logger.info(
@@ -385,12 +600,15 @@ class MOSSVoiceContinue:
     """Continue an existing MOSS-TTS clip: same voice, more text."""
 
     DESCRIPTION = (
-        "Extends a previously generated MOSS-TTS clip by feeding it back to "
-        "the model as the 'assistant' side of a conversation and asking it "
-        "to keep talking. The voice comes from the prior audio itself, so "
-        "there is no separate reference audio input. Output contains only "
-        "the newly-generated audio (concatenate with the input if you want "
-        "the full stream)."
+        "Extends a previously generated MOSS-TTS clip. Internally MOSS is a "
+        "PREFIX-continuation model -- it needs the ORIGINAL text that "
+        "produced 'previous_audio' so it can lock onto the exact point in "
+        "the script where the audio left off, then produce audio for the "
+        "follow-up 'text'. This node concatenates 'previous_text' + 'text' "
+        "into the full script MOSS conditions on; the voice comes from the "
+        "prior audio itself (no separate reference input needed). Output "
+        "contains only the newly-generated audio (concatenate with the "
+        "input if you want the full stream)."
     )
 
     @classmethod
@@ -405,9 +623,25 @@ class MOSSVoiceContinue:
                     "AUDIO",
                     {
                         "tooltip": (
-                            "Prior MOSS output to continue from. Any ComfyUI "
-                            "AUDIO works (typically the AUDIO output of a "
-                            "MOSS-TTS Voice Clone / Voice Continue node)."
+                            "Prior MOSS output to continue from. Typically the "
+                            "AUDIO output of a preceding MOSS-TTS Voice Clone / "
+                            "Voice Continue node. Must be paired with the exact "
+                            "'previous_text' that produced it."
+                        ),
+                    },
+                ),
+                "previous_text": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "placeholder": "The exact text that produced 'previous_audio'",
+                        "tooltip": (
+                            "The exact text that produced 'previous_audio'. "
+                            "MOSS needs it to align its 'where am I in the "
+                            "script?' state. Should match word-for-word "
+                            "(punctuation matters). Passing the wrong prior "
+                            "text -> Kauderwelsch."
                         ),
                     },
                 ),
@@ -418,9 +652,11 @@ class MOSSVoiceContinue:
                         "multiline": True,
                         "placeholder": "Follow-up text to speak next",
                         "tooltip": (
-                            "Text for MOSS to speak after the previous audio. "
-                            "Empty is allowed: the model then improvises a "
-                            "purely acoustic continuation."
+                            "New text to speak after the previous audio ends. "
+                            "Internally concatenated as: previous_text + ' ' + "
+                            "text -> full script. Empty is legal but MOSS "
+                            "will then close out almost immediately -- supply "
+                            "real follow-up text for meaningful output."
                         ),
                     },
                 ),
@@ -454,11 +690,13 @@ class MOSSVoiceContinue:
                         "max": 65536,
                         "step": 1,
                         "tooltip": (
-                            "Optional target length for the CONTINUATION, in "
-                            "audio frames. 0 = disabled (model decides via EOS). "
-                            "12.5 frames/s -> 375 tokens ~30 s, 750 ~60 s. "
-                            "Chain a MOSS-TTS Estimate Tokens node to compute "
-                            "this from the follow-up text."
+                            "Target length of the NEW continuation segment, in "
+                            "audio frames (12.5 fps). 0 = disabled (model "
+                            "decides via EOS). The node adds the measured "
+                            "prefix length internally, because MOSS reads its "
+                            "'tokens' hint as TOTAL (prefix + new) in "
+                            "continuation mode. Chain a MOSS-TTS Estimate "
+                            "Tokens node on the FOLLOW-UP text to compute this."
                         ),
                     },
                 ),
@@ -481,6 +719,44 @@ class MOSSVoiceContinue:
                     {"default": 42, "min": 0, "max": 0xFFFFFFFF,
                      "tooltip": "Random seed. Same seed + same inputs -> identical output."},
                 ),
+                "previous_tokens": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 65536,
+                        "step": 1,
+                        "tooltip": (
+                            "Exact frame count of 'previous_audio'. Wire the "
+                            "'tokens_generated' output of the preceding "
+                            "Speak / Voice Clone / Voice Continue node into "
+                            "this input for a precise handoff. Leave at 0 to "
+                            "measure from the audio duration (fine for "
+                            "externally-loaded WAVs, off by <=1 frame due to "
+                            "rounding)."
+                        ),
+                    },
+                ),
+                "head_trim_frames": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 10,
+                        "step": 1,
+                        "tooltip": (
+                            "Extra frames to trim from the START of the new "
+                            "audio (1 frame = 80 ms at 12.5 fps). MOSS's "
+                            "decoder trims the prefix by SAMPLE proportion, "
+                            "and its conv-based 48 kHz codec has a receptive "
+                            "field that spans frame boundaries -- so the "
+                            "last prefix frame can bleed audibly into the "
+                            "start of the returned continuation. Default 1 "
+                            "(~80 ms) removes it in most cases. Set 0 to "
+                            "disable, higher if the bleed is longer."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -498,6 +774,7 @@ class MOSSVoiceContinue:
         self,
         moss_model: dict[str, Any],
         previous_audio: dict[str, Any],
+        previous_text: str,
         text: str,
         language: str,
         audio_temperature: float,
@@ -506,32 +783,53 @@ class MOSSVoiceContinue:
         target_tokens: int,
         max_new_tokens: int,
         seed: int,
+        previous_tokens: int = 0,
+        head_trim_frames: int = 1,
     ) -> tuple[dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
         device = moss_model["device"]
         _seed(device, seed)
 
+        prev = previous_text.strip()
+        new = text.strip()
+        full_text = (prev + " " + new).strip() if prev else new
+
+        prior_seconds = previous_audio["waveform"].shape[-1] / float(previous_audio["sample_rate"])
+        if previous_tokens and previous_tokens > 0:
+            prefix_frames = int(previous_tokens)
+            prefix_source = "wired"
+        else:
+            prefix_frames = int(round(prior_seconds * MOSS_FRAMES_PER_SECOND))
+            prefix_source = "measured"
+
         with tempfile.TemporaryDirectory(prefix="moss_") as td:
             tmp_dir = Path(td)
             prior_path = _comfy_audio_to_wav(previous_audio, tmp_dir, name="moss_prior.wav")
 
             build_kwargs: dict[str, Any] = {
-                "text": text.strip(),
+                "text": full_text,
                 "language": language,
             }
             tok_hint = _sanitize_target_tokens(target_tokens)
+            total_tokens = None
             if tok_hint is not None:
-                build_kwargs["tokens"] = tok_hint
+                # MOSS interprets `tokens` in continuation as TOTAL (prefix + new).
+                # The node's `target_tokens` input is defined as "frames of NEW audio",
+                # so we add the measured prefix here.
+                total_tokens = tok_hint + prefix_frames
+                build_kwargs["tokens"] = total_tokens
 
             user_msg = processor.build_user_message(**build_kwargs)
             assistant_msg = processor.build_assistant_message(audio_codes_list=[str(prior_path)])
             conversation = [user_msg, assistant_msg]
 
             logger.info(
-                f"[MOSS-TTS] continue text_chars={len(build_kwargs['text'])} "
-                f"lang={language} target_tokens={tok_hint or 'auto'} "
-                f"prior_seconds={previous_audio['waveform'].shape[-1] / float(previous_audio['sample_rate']):.2f}"
+                f"[MOSS-TTS] continue prev_chars={len(prev)} new_chars={len(new)} "
+                f"full_chars={len(full_text)} lang={language} "
+                f"target_new={tok_hint or 'auto'} "
+                f"prefix_frames={prefix_frames} ({prefix_source}) "
+                f"total_tokens_to_moss={total_tokens or 'auto'} prior_seconds={prior_seconds:.2f}"
             )
             batch = processor([conversation], mode="continuation")
 
@@ -545,11 +843,20 @@ class MOSSVoiceContinue:
                     audio_top_k=int(audio_top_k),
                 )
 
-            audio_tensor: torch.Tensor = processor.decode(outputs)[0].audio_codes_list[0]
+            audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
+
+        trim = max(0, int(head_trim_frames))
+        if trim > 0 and audio_tensor.numel() > 0:
+            # 48000 / 12.5 = 3840 samples per frame
+            trim_samples = int(round(trim * MOSS_SAMPLE_RATE / MOSS_FRAMES_PER_SECOND))
+            trim_samples = min(trim_samples, audio_tensor.shape[-1] - 1)
+            if trim_samples > 0:
+                audio_tensor = audio_tensor[..., trim_samples:]
 
         audio_dict, tokens_generated, seconds = _to_comfy_audio(audio_tensor)
         logger.info(
-            f"[MOSS-TTS] continue done seconds={seconds:.2f} tokens_generated={tokens_generated}"
+            f"[MOSS-TTS] continue done seconds={seconds:.2f} "
+            f"tokens_generated={tokens_generated} head_trim_frames={trim}"
         )
         return (audio_dict, tokens_generated)
 
@@ -646,6 +953,7 @@ class MOSSEstimateTokens:
 
 NODE_CLASS_MAPPINGS = {
     "MOSSLoadModel": MOSSLoadModel,
+    "MOSSSpeak": MOSSSpeak,
     "MOSSVoiceClone": MOSSVoiceClone,
     "MOSSVoiceContinue": MOSSVoiceContinue,
     "MOSSEstimateTokens": MOSSEstimateTokens,
@@ -653,6 +961,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MOSSLoadModel": "MOSS-TTS Load Model",
+    "MOSSSpeak": "MOSS-TTS Speak",
     "MOSSVoiceClone": "MOSS-TTS Voice Clone",
     "MOSSVoiceContinue": "MOSS-TTS Voice Continue",
     "MOSSEstimateTokens": "MOSS-TTS Estimate Tokens",
