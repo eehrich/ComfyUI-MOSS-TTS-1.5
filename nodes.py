@@ -246,11 +246,10 @@ class MOSSVoiceClone:
                         "max": 65536,
                         "step": 128,
                         "tooltip": (
-                            "Upper bound on generated audio tokens. MOSS has "
-                            "12 codebooks and runs at 12.5 frames/sec, so "
-                            "150 tokens = 1 s of audio. Default 4096 = ~27 s "
-                            "(fine for a sentence or two). Raise for longer "
-                            "text: 9000 = ~1 min, 45000 = ~5 min."
+                            "Safety cap on generated audio frames. MOSS runs "
+                            "at 12.5 frames/s, so the default 4096 caps output "
+                            "at ~5 min. The model stops on its own EOS token, "
+                            "so real output is usually much shorter."
                         ),
                     },
                 ),
@@ -260,10 +259,7 @@ class MOSSVoiceClone:
                         "default": 42,
                         "min": 0,
                         "max": 0xFFFFFFFF,
-                        "tooltip": (
-                            "Random seed. Same seed + same inputs = identical "
-                            "audio output (deterministic replay)."
-                        ),
+                        "tooltip": "Random seed. Same seed + same inputs -> identical output.",
                     },
                 ),
             },

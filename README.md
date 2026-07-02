@@ -96,8 +96,8 @@ Generates speech from `text` in the voice of `reference_audio`.
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
 | `audio_top_k` | INT | `25` | Top-k sampling |
-| `max_new_tokens` | INT | `4096` | 12 codebooks × 12.5 fps = 150 tokens/s → default 4096 ≈ 27 s; use 9 000 for 1 min, 45 000 for 5 min |
-| `seed` | INT | `42` | Set both `torch` and CUDA seeds for reproducible takes |
+| `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames. MOSS treats this as its internal `frame_budget` at 12.5 fps → default `4096` caps output at ~5 min. Model stops on EOS on its own, so real output is usually much shorter. |
+| `seed` | INT | `42` | Random seed. Same seed + same inputs → identical output. |
 
 **Output**: `AUDIO` (48 kHz stereo). Feed into `PreviewAudio` or `SaveAudio`.
 
@@ -150,10 +150,9 @@ torchaudio.save("out.wav", audio.cpu(), 48000)
 
 ## Duration control
 
-Two different token counts to keep straight:
+`max_new_tokens` is a **safety cap on generated audio frames**, not a duration target. Internally MOSS reads it as its `frame_budget` (see `modeling_moss_tts.py` — `frame_budget = max_new_frames if max_new_frames is not None else max_new_tokens`). At MOSS's fixed audio rate of **12.5 frames/sec**, the default `4096` caps output at roughly **5 minutes**. In practice the model stops on its own EOS token well before that, so tighter caps only matter as a runaway fuse.
 
-- **`max_new_tokens`** (transformer generation cap): MOSS has **12 codebooks × 12.5 frames/sec = 150 tokens per second of audio**. Default `4096` gives about 27 s of headroom. Raise to `~9 000` for a minute, `~45 000` for five minutes.
-- **`tokens`** (target-duration hint, MOSS-specific): passed to the processor's `build_user_message` as **audio frames** (not codebook tokens), so `125 tokens ≈ 10 s`. This nodepack doesn't expose it as a required slider yet, but you can fork and add it in ~5 lines. PRs welcome.
+If you want a soft duration hint (not a cap), MOSS's processor also accepts a `tokens` field in `build_user_message` — same unit (audio frames), so `~125` hints at ~10 s. This nodepack doesn't surface it yet; a PR to add it is welcome.
 
 ## Inline pauses
 
