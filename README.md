@@ -4,7 +4,7 @@ ComfyUI custom nodes for [**MOSS-TTS-Local-Transformer-v1.5**](https://huggingfa
 Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic duration steering, and audio continuation — no fine-tuning, no separate reference-transcript dance.
 
 - **31 languages** (with explicit language tag support)
-- **48 kHz stereo** output
+- **Stereo output** at the loaded model's native rate (48 kHz for the 1.7B Local-Transformer, 24 kHz for the 8B MOSS-TTS)
 - **Reference-free synthesis** via a plain-text instruction ("male, warm, elderly narrator") — no reference audio needed
 - **Zero-shot voice cloning** from a single reference clip
 - **Hard duration control** via `target_tokens` (empirically verified — MOSS obeys it precisely)
@@ -36,16 +36,15 @@ Restart ComfyUI. The first `MOSS-TTS Load Model` execution will download the che
 
 ### Known install gotcha — `configuration_moss_audio_tokenizer.py` dataclass ordering
 
-On Python 3.11+ the auto-downloaded `configuration_moss_audio_tokenizer.py` from
-`OpenMOSS-Team/MOSS-Audio-Tokenizer-v2` declares its dataclass fields without defaults **after** the
-parent class already added defaulted fields, so `dataclass(...)` raises:
+On Python 3.11+ both audio tokenizers used by MOSS v1.5 (`OpenMOSS-Team/MOSS-Audio-Tokenizer-v2` for the 1.7B Local-Transformer, `OpenMOSS-Team/MOSS-Audio-Tokenizer` for the 8B MOSS-TTS variant) declare their dataclass fields without defaults **after** the parent class already added defaulted fields, so `dataclass(...)` raises:
 
 ```
 TypeError: non-default argument 'sampling_rate' follows default argument 'problem_type'
 ```
 
-Fix once, after the first failed load, in the auto-downloaded file under
-`~/.cache/huggingface/modules/transformers_modules/OpenMOSS_hyphen_Team/MOSS_hyphen_Audio_hyphen_Tokenizer_hyphen_v2/<hash>/configuration_moss_audio_tokenizer.py`
+Fix once, after the first failed load, in the auto-downloaded file at either
+`~/.cache/huggingface/modules/transformers_modules/OpenMOSS_hyphen_Team/MOSS_hyphen_Audio_hyphen_Tokenizer_hyphen_v2/<hash>/configuration_moss_audio_tokenizer.py` (needed for the 1.7B Local-Transformer)
+or `~/.cache/huggingface/modules/transformers_modules/OpenMOSS_hyphen_Team/MOSS_hyphen_Audio_hyphen_Tokenizer/<hash>/configuration_moss_audio_tokenizer.py` (needed for the 8B MOSS-TTS)
 — give each of these class fields a `= None` default:
 
 ```python
@@ -78,7 +77,7 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
-| `model_id` | STRING | `OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` | Any compatible Hugging Face repo id |
+| `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` — MossTTSLocal, **48 kHz** stereo output, ~12 GB VRAM bf16. `…MOSS-TTS-v1.5 (8B)` — MossTTSDelay, **24 kHz** stereo output, ~22 GB VRAM. Same API, 31 languages, same duration semantics. Each node reads the actual sample rate from `processor.model_config.sampling_rate` at load time and stamps it on all output audio — no manual configuration needed. The `(1.7B)` / `(8B)` suffix is a UI label only; it is stripped before the HF `from_pretrained` call. |
 | `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable |
 
 `dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).
@@ -102,7 +101,7 @@ Text-to-speech with no reference audio. MOSS uses its trained no-reference path 
 | `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames |
 | `seed` | INT | `42` | Random seed |
 
-**Outputs**: `audio` (48 kHz stereo) + `tokens_generated` (INT).
+**Outputs**: `audio` (stereo at the model's native sample rate) + `tokens_generated` (INT).
 
 ### `MOSS-TTS Voice Clone`
 
@@ -124,7 +123,7 @@ Generates speech from `text` in the voice of `reference_audio`.
 
 **Outputs**:
 
-- `audio` — 48 kHz stereo AUDIO, ready for `PreviewAudio` / `SaveAudio`
+- `audio` — stereo AUDIO at the model's native rate (48 kHz for 1.7B, 24 kHz for 8B), ready for `PreviewAudio` / `SaveAudio`
 - `tokens_generated` — INT, number of audio frames actually produced (divide by 12.5 for seconds)
 
 ### `MOSS-TTS Voice Continue`
@@ -145,9 +144,24 @@ Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** mode
 | `max_new_tokens` | INT | `4096` | Safety cap on the new segment |
 | `seed` | INT | `42` | Random seed |
 | `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). |
-| `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms). MOSS's decoder trims the prefix by sample proportion, and its 48 kHz conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
+| `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms at MOSS's fixed 12.5 fps, regardless of the variant's sample rate). MOSS's decoder trims the prefix by sample proportion, and its conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
 
-**Outputs**: same shape as Voice Clone — `audio` (only the newly-generated segment, not concatenated with input) and `tokens_generated`.
+**Outputs**:
+
+- `audio` — new segment only, head-trimmed. Use for per-segment QC / preview (you hear just the delta).
+- `tokens_generated` — INT, frames of the new segment.
+- `full_audio` — cumulative: `previous_audio + new` concatenated at the model's native sample rate (48 kHz for 1.7B, 24 kHz for 8B). If `previous_audio` was at a different rate it is resampled to the target before concatenation. Wire into the NEXT Voice Continue's `previous_audio` when the same speaker keeps talking across segments — MOSS's continuation expects the full history so far.
+- `full_tokens` — INT, `previous_tokens + tokens_generated`. Wire into the next `previous_tokens` for a precise chain handoff.
+
+Same-speaker chain pattern (segment-by-segment via your backend):
+
+```
+seg N:   Voice Continue → audio, full_audio, full_tokens
+seg N+1: Voice Continue.previous_audio  <-- (seg N).full_audio
+         Voice Continue.previous_tokens <-- (seg N).full_tokens
+```
+
+Save both `audio` (for QC / retake of just this segment) and `full_audio` (as the prev handoff to the next segment). Retake with a different seed rebuilds `full_audio` from the same starting prefix.
 
 ### `MOSS-TTS Estimate Tokens`
 
