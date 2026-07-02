@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-MOSS-TTS-1.5"
 description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS-Local-Transformer-v1.5 — zero-shot voice cloning, 31 languages, 48 kHz stereo output."
-version = "0.1.1"
+version = "0.2.0"
 license = { file = "LICENSE" }
 dependencies = [
   # ComfyUI already ships torch / torchaudio / transformers. We only rely on
