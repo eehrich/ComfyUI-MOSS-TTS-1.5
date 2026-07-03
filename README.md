@@ -73,6 +73,8 @@ All five nodes live under the top-level **`MOSS TTS 1.5`** category in the Comfy
 
 ### `MOSS-TTS Load Model`
 
+<img src="assets/node-load-model.jpg" alt="MOSS-TTS Load Model node" width="420">
+
 Loads the processor + model and caches the instance in-memory across runs.
 Subsequent workflow queues re-use the already-loaded model — no re-load penalty.
 
@@ -86,6 +88,8 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 **Output**: `MOSS_MODEL` — pass to any of the Speak / Voice Clone / Voice Continue nodes.
 
 ### `MOSS-TTS Speak`
+
+<img src="assets/node-speak.jpg" alt="MOSS-TTS Speak node" width="380">
 
 Text-to-speech with no reference audio. MOSS uses its trained no-reference path (a literal `"None"` placeholder in the prompt) and picks a voice based on `language` + `instruction`. `instruction` is your only voice-steering knob here.
 
@@ -106,6 +110,8 @@ Text-to-speech with no reference audio. MOSS uses its trained no-reference path 
 **Outputs**: `audio` (stereo at the model's native sample rate) + `tokens_generated` (INT).
 
 ### `MOSS-TTS Voice Clone`
+
+<img src="assets/node-voice-clone.jpg" alt="MOSS-TTS Voice Clone node" width="380">
 
 Generates speech from `text` in the voice of `reference_audio`.
 
@@ -130,6 +136,8 @@ Generates speech from `text` in the voice of `reference_audio`.
 - `tokens_generated` — INT, number of audio frames actually produced (divide by 12.5 for seconds)
 
 ### `MOSS-TTS Voice Continue`
+
+<img src="assets/node-voice-continue.jpg" alt="MOSS-TTS Voice Continue node" width="380">
 
 Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** model — it needs the *original text* that produced `previous_audio` so it can locate where in the script the audio stopped, then produce audio for the follow-up text. The node concatenates `previous_text + " " + text` internally and hands the full script + prior audio to MOSS. Voice is inherited from the prior audio (no separate reference).
 
@@ -169,6 +177,8 @@ Save both `audio` (for QC / retake of just this segment) and `full_audio` (as th
 
 ### `MOSS-TTS Estimate Tokens`
 
+<img src="assets/node-estimate-tokens.jpg" alt="MOSS-TTS Estimate Tokens node" width="380">
+
 Turns a text into a `target_tokens` estimate you can wire straight into `Voice Clone` / `Voice Continue`.
 
 | Input | Type | Default | Notes |
@@ -198,6 +208,16 @@ Practical uses:
 ---
 
 ## Example workflows
+
+**Reference-free narration** — Load Model → Speak, with an Estimate Tokens node feeding the duration hint and a Preview/Save on the output:
+
+![MOSS-TTS Speak workflow](assets/workflow-speak.jpg)
+
+**Voice clone from a reference clip** — a `Load Audio` reference + Load Model → Voice Clone, again with Estimate Tokens driving `target_tokens`:
+
+![MOSS-TTS Voice Clone workflow](assets/workflow-voice-clone.jpg)
+
+The wiring in condensed form:
 
 **Basic voice clone with automatic duration:**
 
