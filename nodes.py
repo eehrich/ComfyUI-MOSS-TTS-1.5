@@ -50,6 +50,29 @@ MOSS_FRAMES_PER_SECOND = 12.5
 # downstream ComfyUI nodes play back at the right speed.
 MOSS_DEFAULT_SAMPLE_RATE = 48000  # only used as fallback reference in tooltips
 
+# Shared "optional" input definition for the audio repetition penalty.
+# MOSS's generate() natively supports audio_repetition_penalty (applied via
+# _apply_repetition_penalty on the audio-token logits before sampling).
+# 1.0 = neutral/off. Optional section so existing saved workflows keep
+# validating without the field.
+_REP_PENALTY_INPUT = (
+    "FLOAT",
+    {
+        "default": 1.0,
+        "min": 1.0,
+        "max": 2.0,
+        "step": 0.01,
+        "tooltip": (
+            "Penalty on recently generated audio tokens (1.0 = off). "
+            "Mild values (1.05-1.15) suppress the classic autoregressive "
+            "TTS failure modes -- droning, tempo freeze, smeared or "
+            "looping syllables -- while leaving normal prosody untouched "
+            "(it only bites on pathological repeats). Values above ~1.3 "
+            "can distort legitimately repeated sounds ('nein, nein, nein')."
+        ),
+    },
+)
+
 _MODEL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
@@ -193,6 +216,17 @@ def _sanitize_target_tokens(target_tokens: int) -> int | None:
     if target_tokens and target_tokens > 0:
         return int(target_tokens)
     return None
+
+
+def _apply_overshoot_cap(max_new_tokens: int, target_tokens: int | None, overshoot: int) -> int:
+    """Cap effective max_new_tokens when target_tokens is set, to prevent MOSS runaway.
+
+    If target_tokens is unset (None), returns max_new_tokens unchanged (auto-EOS mode).
+    Otherwise returns min(max_new_tokens, target_tokens + overshoot).
+    """
+    if target_tokens is None:
+        return int(max_new_tokens)
+    return min(int(max_new_tokens), int(target_tokens) + max(0, int(overshoot)))
 
 
 def _to_stereo_at(waveform: torch.Tensor, source_sr: int, target_sr: int) -> torch.Tensor:
@@ -376,6 +410,28 @@ class MOSSSpeak:
                         "tooltip": "Random seed. Same seed + same inputs -> identical output.",
                     },
                 ),
+                "target_overshoot_frames": (
+                    "INT",
+                    {
+                        "default": 50,
+                        "min": 0,
+                        "max": 65536,
+                        "step": 10,
+                        "tooltip": (
+                            "Runaway safety cap: when target_tokens > 0, "
+                            "MOSS may only exceed it by this many frames. "
+                            "Effective max_new_tokens = min(max_new_tokens, "
+                            "target_tokens + target_overshoot_frames). "
+                            "Default 50 = 4 s slack at 12.5 fps. Prevents the "
+                            "5.5-min hang MOSS occasionally does with "
+                            "pathologically short text. Ignored when "
+                            "target_tokens = 0 (auto-EOS mode)."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "audio_repetition_penalty": _REP_PENALTY_INPUT,
             },
         }
 
@@ -401,6 +457,8 @@ class MOSSSpeak:
         target_tokens: int,
         max_new_tokens: int,
         seed: int,
+        target_overshoot_frames: int = 50,
+        audio_repetition_penalty: float = 1.0,
     ) -> tuple[dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
@@ -417,11 +475,14 @@ class MOSSSpeak:
         if tok_hint is not None:
             build_kwargs["tokens"] = tok_hint
 
+        effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames)
         logger.info(
             f"[MOSS-TTS] speak text_chars={len(build_kwargs['text'])} "
             f"lang={language} instruction={'set' if instruction.strip() else 'none'} "
-            f"target_tokens={tok_hint or 'auto'} "
-            f"temperature={audio_temperature} top_p={audio_top_p} top_k={audio_top_k}"
+            f"target_tokens={tok_hint or 'auto'} effective_max={effective_max} "
+            f"(user_max={max_new_tokens}, overshoot={target_overshoot_frames}) "
+            f"temperature={audio_temperature} top_p={audio_top_p} top_k={audio_top_k} "
+            f"rep_penalty={audio_repetition_penalty}"
         )
         conversation = [processor.build_user_message(**build_kwargs)]
         batch = processor([conversation], mode="generation")
@@ -430,10 +491,11 @@ class MOSSSpeak:
             outputs = model.generate(
                 input_ids=batch["input_ids"].to(device),
                 attention_mask=batch["attention_mask"].to(device),
-                max_new_tokens=int(max_new_tokens),
+                max_new_tokens=effective_max,
                 audio_temperature=float(audio_temperature),
                 audio_top_p=float(audio_top_p),
                 audio_top_k=int(audio_top_k),
+                audio_repetition_penalty=float(audio_repetition_penalty),
             )
 
         audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
@@ -590,6 +652,28 @@ class MOSSVoiceClone:
                         "tooltip": "Random seed. Same seed + same inputs -> identical output.",
                     },
                 ),
+                "target_overshoot_frames": (
+                    "INT",
+                    {
+                        "default": 50,
+                        "min": 0,
+                        "max": 65536,
+                        "step": 10,
+                        "tooltip": (
+                            "Runaway safety cap: when target_tokens > 0, "
+                            "MOSS may only exceed it by this many frames. "
+                            "Effective max_new_tokens = min(max_new_tokens, "
+                            "target_tokens + target_overshoot_frames). "
+                            "Default 50 = 4 s slack at 12.5 fps. Prevents the "
+                            "5.5-min hang MOSS occasionally does with "
+                            "pathologically short text. Ignored when "
+                            "target_tokens = 0 (auto-EOS mode)."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "audio_repetition_penalty": _REP_PENALTY_INPUT,
             },
         }
 
@@ -616,6 +700,8 @@ class MOSSVoiceClone:
         target_tokens: int,
         max_new_tokens: int,
         seed: int,
+        target_overshoot_frames: int = 50,
+        audio_repetition_penalty: float = 1.0,
     ) -> tuple[dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
@@ -637,11 +723,14 @@ class MOSSVoiceClone:
             if tok_hint is not None:
                 build_kwargs["tokens"] = tok_hint
 
+            effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames)
             logger.info(
                 f"[MOSS-TTS] clone text_chars={len(build_kwargs['text'])} "
                 f"lang={language} instruction={'set' if instruction.strip() else 'none'} "
-                f"target_tokens={tok_hint or 'auto'} "
-                f"temperature={audio_temperature} top_p={audio_top_p} top_k={audio_top_k}"
+                f"target_tokens={tok_hint or 'auto'} effective_max={effective_max} "
+                f"(user_max={max_new_tokens}, overshoot={target_overshoot_frames}) "
+                f"temperature={audio_temperature} top_p={audio_top_p} top_k={audio_top_k} "
+                f"rep_penalty={audio_repetition_penalty}"
             )
             conversation = [processor.build_user_message(**build_kwargs)]
             batch = processor([conversation], mode="generation")
@@ -650,10 +739,11 @@ class MOSSVoiceClone:
                 outputs = model.generate(
                     input_ids=batch["input_ids"].to(device),
                     attention_mask=batch["attention_mask"].to(device),
-                    max_new_tokens=int(max_new_tokens),
+                    max_new_tokens=effective_max,
                     audio_temperature=float(audio_temperature),
                     audio_top_p=float(audio_top_p),
                     audio_top_k=int(audio_top_k),
+                    audio_repetition_penalty=float(audio_repetition_penalty),
                 )
 
             audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
@@ -828,6 +918,28 @@ class MOSSVoiceContinue:
                         ),
                     },
                 ),
+                "target_overshoot_frames": (
+                    "INT",
+                    {
+                        "default": 50,
+                        "min": 0,
+                        "max": 65536,
+                        "step": 10,
+                        "tooltip": (
+                            "Runaway safety cap on the NEW continuation "
+                            "segment: when target_tokens > 0, MOSS may only "
+                            "exceed target_tokens by this many frames. "
+                            "Effective max_new_tokens = min(max_new_tokens, "
+                            "target_tokens + target_overshoot_frames). "
+                            "Default 50 = 4 s slack at 12.5 fps. Prevents "
+                            "long hangs on pathological inputs. Ignored "
+                            "when target_tokens = 0."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "audio_repetition_penalty": _REP_PENALTY_INPUT,
             },
         }
 
@@ -862,6 +974,8 @@ class MOSSVoiceContinue:
         seed: int,
         previous_tokens: int = 0,
         head_trim_frames: int = 1,
+        target_overshoot_frames: int = 50,
+        audio_repetition_penalty: float = 1.0,
     ) -> tuple[dict[str, Any], int, dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
@@ -901,12 +1015,18 @@ class MOSSVoiceContinue:
             assistant_msg = processor.build_assistant_message(audio_codes_list=[str(prior_path)])
             conversation = [user_msg, assistant_msg]
 
+            # max_new_tokens in continuation mode caps NEW frames only (prefix is in input_ids).
+            # target_tokens is defined as "new frames", so the overshoot cap applies directly.
+            effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames)
+
             logger.info(
                 f"[MOSS-TTS] continue prev_chars={len(prev)} new_chars={len(new)} "
                 f"full_chars={len(full_text)} lang={language} "
-                f"target_new={tok_hint or 'auto'} "
+                f"target_new={tok_hint or 'auto'} effective_max={effective_max} "
+                f"(user_max={max_new_tokens}, overshoot={target_overshoot_frames}) "
                 f"prefix_frames={prefix_frames} ({prefix_source}) "
-                f"total_tokens_to_moss={total_tokens or 'auto'} prior_seconds={prior_seconds:.2f}"
+                f"total_tokens_to_moss={total_tokens or 'auto'} prior_seconds={prior_seconds:.2f} "
+                f"rep_penalty={audio_repetition_penalty}"
             )
             batch = processor([conversation], mode="continuation")
 
@@ -914,10 +1034,11 @@ class MOSSVoiceContinue:
                 outputs = model.generate(
                     input_ids=batch["input_ids"].to(device),
                     attention_mask=batch["attention_mask"].to(device),
-                    max_new_tokens=int(max_new_tokens),
+                    max_new_tokens=effective_max,
                     audio_temperature=float(audio_temperature),
                     audio_top_p=float(audio_top_p),
                     audio_top_k=int(audio_top_k),
+                    audio_repetition_penalty=float(audio_repetition_penalty),
                 )
 
             audio_tensor: torch.Tensor = _extract_audio(processor, outputs)

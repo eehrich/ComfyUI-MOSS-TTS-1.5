@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-MOSS-TTS-1.5"
 description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS-Local-Transformer-v1.5 — reference-free TTS, zero-shot voice cloning, audio continuation, hard duration control, 31 languages, 48 kHz stereo output."
-version = "0.4.0"
+version = "0.5.1"
 authors = [
   { name = "Enrico Ehrich" },
   { name = "Claude Opus 4.8 (Anthropic)", email = "noreply@anthropic.com" },

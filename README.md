@@ -9,6 +9,7 @@ Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic d
 - **Zero-shot voice cloning** from a single reference clip
 - **Hard duration control** via `target_tokens` (empirically verified — MOSS obeys it precisely)
 - **Continuation mode** — extend a previously generated clip in the same voice
+- **Audio repetition penalty** (v0.5.1) — optional `audio_repetition_penalty` input on all generate nodes, forwarded to MOSS's native logits penalty. Mild values (1.05–1.15) suppress droning / tempo-freeze / looping-syllable outliers without flattening prosody.
 - **Text → token estimator** so the token count doesn't have to be a guess
 
 The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
@@ -100,6 +101,7 @@ Text-to-speech with no reference audio. MOSS uses its trained no-reference path 
 | `target_tokens` | INT | `0` | Target duration in audio frames (12.5 fps). `0` = model decides via EOS. |
 | `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames |
 | `seed` | INT | `42` | Random seed |
+| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
 
 **Outputs**: `audio` (stereo at the model's native sample rate) + `tokens_generated` (INT).
 
@@ -120,6 +122,7 @@ Generates speech from `text` in the voice of `reference_audio`.
 | `target_tokens` | INT | `0` | Target duration in audio frames (12.5 fps → 375 ≈ 30 s, 750 ≈ 60 s). `0` = disabled, model decides via EOS. See [Duration control](#duration-control). |
 | `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames. MOSS treats this as its internal `frame_budget` at 12.5 fps → default `4096` caps output at ~5 min. |
 | `seed` | INT | `42` | Random seed. Same seed + same inputs → identical output. |
+| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
 
 **Outputs**:
 
@@ -145,6 +148,7 @@ Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** mode
 | `seed` | INT | `42` | Random seed |
 | `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). |
 | `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms at MOSS's fixed 12.5 fps, regardless of the variant's sample rate). MOSS's decoder trims the prefix by sample proportion, and its conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
+| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
 
 **Outputs**:
 
