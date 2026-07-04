@@ -76,6 +76,40 @@ _REP_PENALTY_INPUT = (
     },
 )
 
+# Shared "optional" inputs for the TEXT-stream sampler. MOSS v1.5 is a
+# dual-stream (text + audio) model: generate() samples the text tokens that
+# drive alignment/pacing with these, independently of the audio_* samplers
+# that shape the acoustic codebook. Defaults match MOSS's own generate()
+# defaults (1.0 / 1.0 / 50), so leaving them untouched changes nothing.
+# Lowering text_temperature / tightening text_top_p|k stabilizes pacing and
+# alignment without flattening the acoustic dynamics (which come from
+# audio_temperature). Optional so existing saved workflows keep validating.
+_TEXT_TEMPERATURE_INPUT = (
+    "FLOAT",
+    {
+        "default": 1.0, "min": 0.1, "max": 3.0, "step": 0.05,
+        "tooltip": (
+            "Temperature for the TEXT stream (alignment/pacing), NOT the "
+            "acoustics. MOSS default 1.0. Lower = steadier pacing/alignment; "
+            "does not flatten the voice (that's audio_temperature)."
+        ),
+    },
+)
+_TEXT_TOP_P_INPUT = (
+    "FLOAT",
+    {
+        "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+        "tooltip": "Nucleus (top-p) cutoff for the TEXT stream. MOSS default 1.0 (off).",
+    },
+)
+_TEXT_TOP_K_INPUT = (
+    "INT",
+    {
+        "default": 50, "min": 1, "max": 200, "step": 1,
+        "tooltip": "Top-k cutoff for the TEXT stream. MOSS default 50.",
+    },
+)
+
 _MODEL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
@@ -435,6 +469,9 @@ class MOSSSpeak:
             },
             "optional": {
                 "audio_repetition_penalty": _REP_PENALTY_INPUT,
+                "text_temperature": _TEXT_TEMPERATURE_INPUT,
+                "text_top_p": _TEXT_TOP_P_INPUT,
+                "text_top_k": _TEXT_TOP_K_INPUT,
             },
         }
 
@@ -462,6 +499,9 @@ class MOSSSpeak:
         seed: int,
         target_overshoot_frames: int = 50,
         audio_repetition_penalty: float = 1.0,
+        text_temperature: float = 1.0,
+        text_top_p: float = 1.0,
+        text_top_k: int = 50,
     ) -> tuple[dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
@@ -499,6 +539,9 @@ class MOSSSpeak:
                 audio_top_p=float(audio_top_p),
                 audio_top_k=int(audio_top_k),
                 audio_repetition_penalty=float(audio_repetition_penalty),
+                text_temperature=float(text_temperature),
+                text_top_p=float(text_top_p),
+                text_top_k=int(text_top_k),
             )
 
         audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
@@ -677,6 +720,9 @@ class MOSSVoiceClone:
             },
             "optional": {
                 "audio_repetition_penalty": _REP_PENALTY_INPUT,
+                "text_temperature": _TEXT_TEMPERATURE_INPUT,
+                "text_top_p": _TEXT_TOP_P_INPUT,
+                "text_top_k": _TEXT_TOP_K_INPUT,
             },
         }
 
@@ -705,6 +751,9 @@ class MOSSVoiceClone:
         seed: int,
         target_overshoot_frames: int = 50,
         audio_repetition_penalty: float = 1.0,
+        text_temperature: float = 1.0,
+        text_top_p: float = 1.0,
+        text_top_k: int = 50,
     ) -> tuple[dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
@@ -747,6 +796,9 @@ class MOSSVoiceClone:
                     audio_top_p=float(audio_top_p),
                     audio_top_k=int(audio_top_k),
                     audio_repetition_penalty=float(audio_repetition_penalty),
+                    text_temperature=float(text_temperature),
+                    text_top_p=float(text_top_p),
+                    text_top_k=int(text_top_k),
                 )
 
             audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
@@ -943,6 +995,9 @@ class MOSSVoiceContinue:
             },
             "optional": {
                 "audio_repetition_penalty": _REP_PENALTY_INPUT,
+                "text_temperature": _TEXT_TEMPERATURE_INPUT,
+                "text_top_p": _TEXT_TOP_P_INPUT,
+                "text_top_k": _TEXT_TOP_K_INPUT,
             },
         }
 
@@ -979,6 +1034,9 @@ class MOSSVoiceContinue:
         head_trim_frames: int = 1,
         target_overshoot_frames: int = 50,
         audio_repetition_penalty: float = 1.0,
+        text_temperature: float = 1.0,
+        text_top_p: float = 1.0,
+        text_top_k: int = 50,
     ) -> tuple[dict[str, Any], int, dict[str, Any], int]:
         processor = moss_model["processor"]
         model = moss_model["model"]
@@ -1042,6 +1100,9 @@ class MOSSVoiceContinue:
                     audio_top_p=float(audio_top_p),
                     audio_top_k=int(audio_top_k),
                     audio_repetition_penalty=float(audio_repetition_penalty),
+                    text_temperature=float(text_temperature),
+                    text_top_p=float(text_top_p),
+                    text_top_k=int(text_top_k),
                 )
 
             audio_tensor: torch.Tensor = _extract_audio(processor, outputs)
