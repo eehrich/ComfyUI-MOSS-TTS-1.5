@@ -17,5 +17,5 @@ Repository = "https://github.com/eehrich/ComfyUI-MOSS-TTS-1.5"
 Model = "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5"
 
 [tool.comfy]
-PublisherId = "eehrich"
+PublisherId = "SniperNCE"
 DisplayName = "MOSS-TTS 1.5"
