@@ -12,6 +12,9 @@ Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic d
 - **Hard duration control** via `target_tokens` (empirically verified — MOSS obeys it precisely)
 - **Continuation mode** — extend a previously generated clip in the same voice
 - **Audio repetition penalty** (v0.5.1) — optional `audio_repetition_penalty` input on all generate nodes, forwarded to MOSS's native logits penalty. Mild values (1.05–1.15) suppress droning / tempo-freeze / looping-syllable outliers without flattening prosody.
+- **Text-stream samplers** (v0.5.4) — optional `text_temperature` / `text_top_p` / `text_top_k` on all generate nodes to steer MOSS's dual-stream **text** channel (pacing / alignment) independently of the acoustic `audio_*` samplers.
+- **Robust attention** (v0.5.5) — no `flash_attn` crash on a fresh install; the loader's `attention: auto` falls back to PyTorch's built-in `sdpa` when flash-attn is absent.
+- **Empty-text guard** (v0.5.6) — an empty / whitespace-only prompt fails fast with a clear message instead of making MOSS generate audio until `max_new_tokens` (a multi-minute hang, since it never emits EOS with nothing to say).
 - **Text → token estimator** so the token count doesn't have to be a guess
 
 The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
@@ -68,6 +71,30 @@ quantizer_kwargs: dict[str, Any] = None
 ```
 
 Nothing behavioural changes — the real defaults still come from the class's `__init__`.
+
+### Optional: `flash-attn` for faster attention
+
+**Not required.** The plugin runs on PyTorch's built-in `sdpa` out of the box (the Load Model `attention: auto` default picks it when `flash_attn` is absent). `flash_attention_2` is only a speed win on long contexts. Install it only if you want that.
+
+**Linux / WSL** (usually straightforward):
+
+```bash
+pip install flash-attn --no-build-isolation
+```
+
+**Windows** (into your ComfyUI's Python env — adjust the path):
+
+```bat
+path\to\ComfyUI\.venv\Scripts\python.exe -m pip install flash-attn --no-build-isolation
+```
+
+On Windows this **compiles from source**: you need the matching **CUDA Toolkit**, **ninja**, and the **MSVC C++ Build Tools**, plus ~30–90 min and a lot of RAM. Faster and more reliable is a **prebuilt wheel** matching your exact `python` / `torch` / CUDA combo — community builds live at
+[bdashore3/flash-attention](https://github.com/bdashore3/flash-attention/releases) and
+[kingbri1/flash-attention](https://github.com/kingbri1/flash-attention/releases).
+
+> ⚠️ Very new CUDA builds (e.g. **cu130** with torch 2.9) often have **no prebuilt Windows wheel yet**, and source compilation against a brand-new toolkit frequently fails. If so, just stay on `sdpa` — the quality is identical, only long-context speed differs.
+
+After a successful install, set the Load Model `attention` input to `auto` (it will now select `flash_attention_2`) or force `flash_attention_2`.
 
 ---
 
@@ -157,7 +184,7 @@ Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** mode
 | `moss_model` | MOSS_MODEL | — | From the loader |
 | `previous_audio` | AUDIO | — | Prior MOSS output (typically another node's `audio` output) |
 | `previous_text` | STRING | `""` | **The exact text that produced `previous_audio`.** Word-for-word match matters — wrong prior text → garbled output (MOSS can't align its script position). |
-| `text` | STRING | `""` | Follow-up text to speak next. Empty is legal but produces near-instant EOS — supply real text. |
+| `text` | STRING | `""` | Follow-up text to speak next. **Must be non-empty** — an empty / whitespace-only prompt raises a clear error instead of hanging (v0.5.6 guard; MOSS never emits EOS with nothing to say and would generate until `max_new_tokens`). |
 | `language` | enum | `English` | Same list as Voice Clone |
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
@@ -222,6 +249,21 @@ Practical uses:
 ---
 
 ## Example workflows
+
+### Full pipeline — Speak → Clone → Continue (downloadable)
+
+The bundled [`example_workflows/MOSS-TTS_Full.json`](example_workflows/MOSS-TTS_Full.json) wires the whole chain end to end (ComfyUI-Manager also lists it under this pack's example workflows). Drop the JSON on the ComfyUI canvas — or **Workflow → Open** — to load it, then swap the two `String (Multiline)` nodes for your own text; everything else is pre-wired.
+
+![Full MOSS-TTS pipeline](assets/workflow-full.jpg)
+
+1. **Load Model** once, fanned out to all three generators.
+2. **Speak** synthesizes a fresh voice from a short seed line (no reference) → *Preview: Voice*.
+3. **Voice Clone** takes that audio as `reference_audio` and narrates segment 1 in the same voice; an **Estimate Tokens** node sets its duration → *Preview: Seg 1*. Its `tokens_generated` is wired forward as the exact prefix length.
+4. **Voice Continue** takes the clone's `audio` + `tokens_generated` and narrates segment 2 — inheriting the voice and continuing the script → *Preview: Seg 2*. Its `full_audio` output is the merged single-take result → *Preview: Merged*.
+
+This is the canonical "create a voice, then narrate a multi-segment passage in it" pattern; the individual node/workflow shots below break out each piece.
+
+### Reference-free narration & single voice clone
 
 **Reference-free narration** — Load Model → Speak, with an Estimate Tokens node feeding the duration hint and a Preview/Save on the output:
 
@@ -289,7 +331,7 @@ processor.audio_tokenizer = processor.audio_tokenizer.to("cuda")
 model = AutoModel.from_pretrained(
     "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",
     trust_remote_code=True,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
 ).to("cuda")
 
 conv = [processor.build_user_message(

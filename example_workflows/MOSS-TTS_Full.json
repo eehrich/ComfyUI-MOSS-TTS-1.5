@@ -1,0 +1,698 @@
+{
+  "id": "9e508a8d-e974-4977-aa90-a341af15caa1",
+  "revision": 0,
+  "last_node_id": 12,
+  "last_link_id": 21,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MOSSSpeak",
+      "pos": [
+        2141.279220223934,
+        4186.460871749082
+      ],
+      "size": [
+        400,
+        474
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moss_model",
+          "type": "MOSS_MODEL",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            9,
+            14
+          ]
+        },
+        {
+          "name": "tokens_generated",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MOSSSpeak"
+      },
+      "widgets_values": [
+        "Hallo das ist ein Text um eine Stimme zu generieren. Diese wird benutzt um eine Stimme zu clonen.",
+        "German",
+        "",
+        1.7,
+        0.8,
+        25,
+        0,
+        4096,
+        51,
+        "fixed",
+        50,
+        1,
+        1,
+        1,
+        50
+      ]
+    },
+    {
+      "id": 2,
+      "type": "MOSSVoiceClone",
+      "pos": [
+        2819.00462022393,
+        4460.2475717491
+      ],
+      "size": [
+        400,
+        474
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moss_model",
+          "type": "MOSS_MODEL",
+          "link": 2
+        },
+        {
+          "name": "reference_audio",
+          "type": "AUDIO",
+          "link": 9
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 17
+        },
+        {
+          "name": "target_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "target_tokens"
+          },
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            8,
+            15
+          ]
+        },
+        {
+          "name": "tokens_generated",
+          "type": "INT",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MOSSVoiceClone"
+      },
+      "widgets_values": [
+        "Hello, this is a test.",
+        "German",
+        "",
+        1.7,
+        0.8,
+        25,
+        0,
+        4096,
+        2185160773,
+        "randomize",
+        50,
+        1,
+        1,
+        1,
+        50
+      ]
+    },
+    {
+      "id": 3,
+      "type": "MOSSVoiceContinue",
+      "pos": [
+        3438.95567807517,
+        4503.625457699519
+      ],
+      "size": [
+        400,
+        562
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "moss_model",
+          "type": "MOSS_MODEL",
+          "link": 3
+        },
+        {
+          "name": "previous_audio",
+          "type": "AUDIO",
+          "link": 8
+        },
+        {
+          "name": "previous_text",
+          "type": "STRING",
+          "widget": {
+            "name": "previous_text"
+          },
+          "link": 19
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 18
+        },
+        {
+          "name": "target_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "target_tokens"
+          },
+          "link": 11
+        },
+        {
+          "name": "previous_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "previous_tokens"
+          },
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            20
+          ]
+        },
+        {
+          "name": "tokens_generated",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "full_audio",
+          "type": "AUDIO",
+          "links": [
+            21
+          ]
+        },
+        {
+          "name": "full_tokens",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MOSSVoiceContinue"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "German",
+        1.7,
+        0.8,
+        25,
+        0,
+        4096,
+        164435017,
+        "randomize",
+        0,
+        1,
+        50,
+        1,
+        1,
+        1,
+        50
+      ]
+    },
+    {
+      "id": 4,
+      "type": "MOSSEstimateTokens",
+      "pos": [
+        2365.646987992518,
+        4926.825982492882
+      ],
+      "size": [
+        323.96694214876015,
+        123.96694214876061
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "target_tokens",
+          "type": "INT",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MOSSEstimateTokens"
+      },
+      "widgets_values": [
+        "",
+        150
+      ]
+    },
+    {
+      "id": 5,
+      "type": "MOSSLoadModel",
+      "pos": [
+        2151.1803202239344,
+        3926.822371749101
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "moss_model",
+          "type": "MOSS_MODEL",
+          "links": [
+            1,
+            2,
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MOSSLoadModel"
+      },
+      "widgets_values": [
+        "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5 (1.7B)",
+        "cuda",
+        "auto"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "PreviewAudio",
+      "pos": [
+        3992.5783080594633,
+        4566.743128411907
+      ],
+      "size": [
+        270,
+        88
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 20
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Audio - Seg 2",
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 7,
+      "type": "MOSSEstimateTokens",
+      "pos": [
+        2719.008245843789,
+        5101.581680839981
+      ],
+      "size": [
+        319.8347107438012,
+        125.61983471074382
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "target_tokens",
+          "type": "INT",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MOSSEstimateTokens"
+      },
+      "widgets_values": [
+        "",
+        150
+      ]
+    },
+    {
+      "id": 8,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        1856.0312276619536,
+        4865.7471543937145
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            12,
+            17,
+            19
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "Im eingeschneiten Schweizer Hochtal Valmùr soll der Patriarch und mächtige Investor Viktor Hess abgereist sein, doch die einheimische, hochgradig instinktgetriebene Kriminalbeamtin Flurina Caduff glaubt kein Wort. Nach einem frustrierenden Tag, an dem das verschworene Dorf lückenlos mauert, steht sie angetrunken im Hotelgang. Ein einzelner, hastig falsch geschnürter Skischuh mit verräterischen Spuren von Streusalz vor Zimmer 12 stört sie; er triggert eine tiefe, wütende Erinnerung an die perfiden familiären Inszenierungen in ihrem eigenen Bergdorf. Impulsiv tritt sie die Tür ein und findet Viktors Leiche im Bettkasten. Die Tat geschah eindeutig in der vergangenen Dienstagnacht. Ihr strafversetzter Zürcher Partner Silvan Rossi, ein eiskalter Analytiker, zwingt der wilden Entdeckung sofort Struktur auf. Zwischen Rossi, der Aussagen kartografiert, und Flurina, die stumme soziale Spannungen auslotet, entspinnt sich ein hartes Duell um die richtige Methode."
+      ]
+    },
+    {
+      "id": 9,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        1986.3926888189778,
+        5177.034032906123
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            13,
+            18
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "Das Opfer, Viktor Hess, war verhasst wie unverzichtbar. Vor zehn Jahren finanzierte er die Lawinenverbauung und nutzte dieses Kapital seither, um die Familien des Tals durch Erpressung gnadenlos zu kontrollieren. Die drei Hauptverdächtigen sind toxisch verstrickt: Beatrice Hess, Viktors Schwester und heimliche Matriarchin, verbirgt eine uneheliche Tochter; Viktor drohte, dies publik zu machen. Corsin Vieli, Skischulleiter, zweigte Gelder ab. Sina Loretz, Hotelmanagerin, führte eine heimliche Liebe mit Corsin. Für genau jene Dienstagnacht des Mordes präsentieren die drei jedoch ein vollkommen wasserdichtes, gemeinsames Alibi in der verschlossenen Hotel-Lounge. Jeder lügt offensichtlich, um ein zutiefst menschliches, aber nicht primär tödliches Geheimnis zu wahren."
+      ]
+    },
+    {
+      "id": 10,
+      "type": "PreviewAudio",
+      "pos": [
+        3991.895294604098,
+        4268.63361803009
+      ],
+      "size": [
+        270,
+        88
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 14
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Audio - Voice",
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 11,
+      "type": "PreviewAudio",
+      "pos": [
+        3991.895294604098,
+        4413.264918030081
+      ],
+      "size": [
+        270,
+        88
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 15
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Audio - Seg 1",
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 12,
+      "type": "PreviewAudio",
+      "pos": [
+        3994.5631270677213,
+        4718.42427945347
+      ],
+      "size": [
+        270,
+        88
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 21
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Audio - Merged",
+      "properties": {
+        "Node name for S&R": "PreviewAudio"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [
+      1,
+      5,
+      0,
+      1,
+      0,
+      "MOSS_MODEL"
+    ],
+    [
+      2,
+      5,
+      0,
+      2,
+      0,
+      "MOSS_MODEL"
+    ],
+    [
+      3,
+      5,
+      0,
+      3,
+      0,
+      "MOSS_MODEL"
+    ],
+    [
+      5,
+      2,
+      1,
+      3,
+      5,
+      "INT"
+    ],
+    [
+      8,
+      2,
+      0,
+      3,
+      1,
+      "AUDIO"
+    ],
+    [
+      9,
+      1,
+      0,
+      2,
+      1,
+      "AUDIO"
+    ],
+    [
+      10,
+      4,
+      0,
+      2,
+      3,
+      "INT"
+    ],
+    [
+      11,
+      7,
+      0,
+      3,
+      4,
+      "INT"
+    ],
+    [
+      12,
+      8,
+      0,
+      4,
+      0,
+      "STRING"
+    ],
+    [
+      13,
+      9,
+      0,
+      7,
+      0,
+      "STRING"
+    ],
+    [
+      14,
+      1,
+      0,
+      10,
+      0,
+      "AUDIO"
+    ],
+    [
+      15,
+      2,
+      0,
+      11,
+      0,
+      "AUDIO"
+    ],
+    [
+      17,
+      8,
+      0,
+      2,
+      2,
+      "STRING"
+    ],
+    [
+      18,
+      9,
+      0,
+      3,
+      3,
+      "STRING"
+    ],
+    [
+      19,
+      8,
+      0,
+      3,
+      2,
+      "STRING"
+    ],
+    [
+      20,
+      3,
+      0,
+      6,
+      0,
+      "AUDIO"
+    ],
+    [
+      21,
+      3,
+      2,
+      12,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.8264462809917354,
+      "offset": [
+        -1322.3706149442303,
+        -3753.495921417815
+      ]
+    },
+    "workflowRendererVersion": "LG",
+    "frontendVersion": "1.36.13"
+  },
+  "version": 0.4
+}

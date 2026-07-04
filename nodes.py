@@ -179,7 +179,7 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
         f"(dtype={dtype_name}, device={device}, attn={attn}) ..."
     )
     model = AutoModel.from_pretrained(
-        model_id, trust_remote_code=True, torch_dtype=dtype,
+        model_id, trust_remote_code=True, dtype=dtype,
         attn_implementation=attn,
     ).to(device)
     model.eval()
@@ -317,6 +317,24 @@ def _sanitize_target_tokens(target_tokens: int) -> int | None:
     if target_tokens and target_tokens > 0:
         return int(target_tokens)
     return None
+
+
+def _require_text(text: str, field: str = "text") -> str:
+    """Return text.strip(), raising on empty/whitespace-only input.
+
+    MOSS's generate() has no guard against an empty prompt: with nothing to
+    say it never emits the EOS token and keeps sampling audio frames until it
+    hits max_new_tokens — minutes of garbage on a hang that looks like the
+    node is frozen. Fail fast with a clear message instead.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        raise ValueError(
+            f"MOSS-TTS: '{field}' is empty. Provide non-empty text to speak — "
+            "an empty prompt makes MOSS generate audio until max_new_tokens "
+            "(it never stops on its own), which looks like a hang."
+        )
+    return stripped
 
 
 def _apply_overshoot_cap(max_new_tokens: int, target_tokens: int | None, overshoot: int) -> int:
@@ -572,8 +590,9 @@ class MOSSSpeak:
         device = moss_model["device"]
         _seed(device, seed)
 
+        clean_text = _require_text(text, "text")
         build_kwargs: dict[str, Any] = {
-            "text": text.strip(),
+            "text": clean_text,
             "language": language,
         }
         if instruction.strip():
@@ -824,12 +843,13 @@ class MOSSVoiceClone:
         device = moss_model["device"]
         _seed(device, seed)
 
+        clean_text = _require_text(text, "text")
         with tempfile.TemporaryDirectory(prefix="moss_") as td:
             tmp_dir = Path(td)
             ref_path = _comfy_audio_to_wav(reference_audio, tmp_dir, name="moss_ref.wav")
 
             build_kwargs: dict[str, Any] = {
-                "text": text.strip(),
+                "text": clean_text,
                 "reference": [str(ref_path)],
                 "language": language,
             }
@@ -1107,8 +1127,8 @@ class MOSSVoiceContinue:
         device = moss_model["device"]
         _seed(device, seed)
 
-        prev = previous_text.strip()
-        new = text.strip()
+        new = _require_text(text, "text")
+        prev = (previous_text or "").strip()
         full_text = (prev + " " + new).strip() if prev else new
 
         prior_seconds = previous_audio["waveform"].shape[-1] / float(previous_audio["sample_rate"])
