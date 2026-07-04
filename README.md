@@ -24,6 +24,7 @@ The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
   **~12 GB for the 1.7B Local-Transformer**, **~22 GB for the 8B** full model.
 - Python 3.10+
 - `transformers >= 5.0.0` (v5.5.x recommended; the same range MOSS's official code targets)
+- **`flash_attn` is NOT required.** MOSS's model code defaults to `flash_attention_2`, but the loader's `attention: auto` detects whether `flash_attn` is installed and falls back to PyTorch's built-in `sdpa` if not — so a plain install runs out of the box. Install `flash-attn` only if you want that backend.
 - `torch`, `torchaudio` (whatever your ComfyUI already ships with)
 - Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** in your Hugging Face cache
 
@@ -85,6 +86,7 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 |---|---|---|---|
 | `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` — MossTTSLocal, **48 kHz** stereo output, ~12 GB VRAM bf16. `…MOSS-TTS-v1.5 (8B)` — MossTTSDelay, **24 kHz** stereo output, ~22 GB VRAM. Same API, 31 languages, same duration semantics. Each node reads the actual sample rate from `processor.model_config.sampling_rate` at load time and stamps it on all output audio — no manual configuration needed. The `(1.7B)` / `(8B)` suffix is a UI label only; it is stripped before the HF `from_pretrained` call. |
 | `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable |
+| `attention` | enum | `auto` | *(optional)* Attention backend. `auto` uses `flash_attention_2` only if `flash_attn` is installed, else PyTorch `sdpa` (built-in, no extra deps). Force `sdpa`/`eager` for max compatibility, or `flash_attention_2` if you installed flash-attn. Prevents the "flash_attn is not installed" crash on fresh installs. |
 
 `dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).
 

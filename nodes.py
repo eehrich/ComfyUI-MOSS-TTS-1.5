@@ -110,7 +110,11 @@ _TEXT_TOP_K_INPUT = (
     },
 )
 
-_MODEL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_MODEL_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+# Attention backends offered in the loader dropdown. "auto" is the safe
+# default (flash_attention_2 only if flash_attn is installed, else sdpa).
+ATTENTION_CHOICES = ["auto", "sdpa", "flash_attention_2", "eager"]
 
 
 def _resolve_dtype(device: str) -> tuple[torch.dtype, str]:
@@ -120,8 +124,46 @@ def _resolve_dtype(device: str) -> tuple[torch.dtype, str]:
     return torch.float32, "float32"
 
 
-def _load_bundle(model_id: str, device: str) -> dict[str, Any]:
-    key = (model_id, device)
+def _flash_attn_available(device: str) -> bool:
+    """True only if the flash_attn package is importable and we're on CUDA."""
+    if not device.startswith("cuda"):
+        return False
+    try:
+        import flash_attn  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_attention(device: str, requested: str) -> str:
+    """Resolve attn_implementation, robust on installs WITHOUT flash_attn.
+
+    MOSS's remote code defaults to ``flash_attention_2``, which hard-crashes
+    with ImportError if the ``flash_attn`` package is not installed — the
+    common case on a fresh ComfyUI. So:
+      * ``auto`` (default) uses flash_attention_2 only when flash_attn is
+        actually importable on CUDA, otherwise ``sdpa`` (built into PyTorch,
+        no extra install, fast on modern GPUs).
+      * an explicit ``flash_attention_2`` request that can't be satisfied
+        falls back to ``sdpa`` with a warning instead of crashing.
+      * ``sdpa`` / ``eager`` are passed through.
+    """
+    req = (requested or "auto").lower()
+    if req == "auto":
+        return "flash_attention_2" if _flash_attn_available(device) else "sdpa"
+    if req == "flash_attention_2" and not _flash_attn_available(device):
+        logger.warning(
+            "[MOSS-TTS] attn_implementation='flash_attention_2' requested but "
+            "flash_attn is not installed (or device is CPU); falling back to "
+            "'sdpa'. Install flash-attn to enable it."
+        )
+        return "sdpa"
+    return req
+
+
+def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[str, Any]:
+    attn = _resolve_attention(device, attention)
+    key = (model_id, device, attn)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
 
@@ -132,9 +174,13 @@ def _load_bundle(model_id: str, device: str) -> dict[str, Any]:
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     processor.audio_tokenizer = processor.audio_tokenizer.to(device)
 
-    logger.info(f"[MOSS-TTS] loading model '{model_id}' (dtype={dtype_name}, device={device}) ...")
+    logger.info(
+        f"[MOSS-TTS] loading model '{model_id}' "
+        f"(dtype={dtype_name}, device={device}, attn={attn}) ..."
+    )
     model = AutoModel.from_pretrained(
         model_id, trust_remote_code=True, torch_dtype=dtype,
+        attn_implementation=attn,
     ).to(device)
     model.eval()
 
@@ -202,6 +248,24 @@ class MOSSLoadModel:
                     },
                 ),
             },
+            "optional": {
+                "attention": (
+                    ATTENTION_CHOICES,
+                    {
+                        "default": "auto",
+                        "tooltip": (
+                            "Attention backend. MOSS's model code defaults to "
+                            "flash_attention_2, which CRASHES if the flash_attn "
+                            "package isn't installed. 'auto' (recommended) uses "
+                            "flash_attention_2 only when flash_attn is actually "
+                            "available, otherwise 'sdpa' (built into PyTorch, no "
+                            "extra install, fast). Force 'sdpa'/'eager' for "
+                            "maximum compatibility, or 'flash_attention_2' only "
+                            "if you installed flash-attn."
+                        ),
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("MOSS_MODEL",)
@@ -210,12 +274,12 @@ class MOSSLoadModel:
     FUNCTION = "load"
     CATEGORY = "MOSS TTS 1.5"
 
-    def load(self, model_id: str, device: str):
+    def load(self, model_id: str, device: str, attention: str = "auto"):
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("[MOSS-TTS] CUDA requested but not available; falling back to cpu.")
             device = "cpu"
         repo_id = _repo_id_from_label(model_id)
-        bundle = _load_bundle(repo_id, device)
+        bundle = _load_bundle(repo_id, device, attention=attention)
         return (bundle,)
 
 
