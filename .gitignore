@@ -6,3 +6,6 @@ __pycache__/
 *.wav
 *.mp3
 *.safetensors
+
+# comfy-cli publish artifact
+node.zip

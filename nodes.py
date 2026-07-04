@@ -1,4 +1,7 @@
-"""ComfyUI nodes for OpenMOSS MOSS-TTS-Local-Transformer-v1.5.
+"""ComfyUI nodes for OpenMOSS MOSS-TTS v1.5.
+
+Supports both variants (selected in the Load Model dropdown): the 1.7B
+Local-Transformer (48 kHz, default) and the 8B full MOSS-TTS (24 kHz).
 
 Five nodes:
   - MOSSLoadModel:        loads the processor + model once, caches by (model_id, device).

@@ -1,8 +1,10 @@
 # ComfyUI-MOSS-TTS-1.5
 
-ComfyUI custom nodes for [**MOSS-TTS-Local-Transformer-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) by [OpenMOSS](https://github.com/OpenMOSS).
+ComfyUI custom nodes for **MOSS-TTS v1.5** by [OpenMOSS](https://github.com/OpenMOSS) — supporting **both** model variants:
+[**MOSS-TTS-Local-Transformer-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) (~1.7B, 48 kHz, the fast default) and the full [**MOSS-TTS-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (~8B, 24 kHz). Pick either in the Load Model dropdown — same nodes, same API.
 Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic duration steering, and audio continuation — no fine-tuning, no separate reference-transcript dance.
 
+- **Two models, one nodepack** — 1.7B Local-Transformer (48 kHz) or 8B full MOSS-TTS (24 kHz), selected per workflow
 - **31 languages** (with explicit language tag support)
 - **Stereo output** at the loaded model's native rate (48 kHz for the 1.7B Local-Transformer, 24 kHz for the 8B MOSS-TTS)
 - **Reference-free synthesis** via a plain-text instruction ("male, warm, elderly narrator") — no reference audio needed
@@ -18,11 +20,12 @@ The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
 
 ## Requirements
 
-- ComfyUI running on a machine with a CUDA GPU (~12 GB VRAM in `bfloat16`, measured on RTX 5090)
+- ComfyUI running on a machine with a CUDA GPU. VRAM in `bfloat16`:
+  **~12 GB for the 1.7B Local-Transformer**, **~22 GB for the 8B** full model.
 - Python 3.10+
 - `transformers >= 5.0.0` (v5.5.x recommended; the same range MOSS's official code targets)
 - `torch`, `torchaudio` (whatever your ComfyUI already ships with)
-- ~9.1 GB free disk for the model weights (auto-downloaded from Hugging Face)
+- Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** in your Hugging Face cache
 
 That's it — no extra CUDA extensions, no custom kernels.
 
@@ -33,7 +36,7 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/eehrich/ComfyUI-MOSS-TTS-1.5.git MOSS-TTS-ComfyUI
 ```
 
-Restart ComfyUI. The first `MOSS-TTS Load Model` execution will download the checkpoint (~9.1 GB) into your Hugging Face cache.
+Restart ComfyUI. The first `MOSS-TTS Load Model` execution downloads the selected checkpoint into your Hugging Face cache (~9.1 GB for the 1.7B, ~17 GB for the 8B).
 
 ### Known install gotcha — `configuration_moss_audio_tokenizer.py` dataclass ordering
 
@@ -299,9 +302,9 @@ torchaudio.save("out.wav", audio.cpu(), 48000)
 
 ## Performance & memory
 
-Measured on a single-turn 75-character German sentence, RTX 5090 (bf16):
+Figures below are for the **1.7B Local-Transformer** (the default), single-turn 75-character German sentence, RTX 5090 (bf16). The **8B** model loads a larger checkpoint (~17 GB) and needs ~22 GB VRAM, so both load and generation are correspondingly slower.
 
-| Phase | Time |
+| Phase | Time (1.7B) |
 |---|---|
 | Processor load (audio tokenizer moved to GPU) | ~21 s |
 | Model load (9.1 GB checkpoint → GPU) | ~16 s |
@@ -309,7 +312,7 @@ Measured on a single-turn 75-character German sentence, RTX 5090 (bf16):
 
 Load happens once per (model_id, device, dtype). Warm-cache generation is real-time on modern hardware.
 
-VRAM: ~12 GB active weight + activations in `bfloat16` (measured on RTX 5090). Peak spikes with long contexts (e.g. very long text or `max_new_tokens=16384`) can push higher. RTX 3090 (24 GB) has comfortable headroom.
+VRAM: ~12 GB active weight + activations in `bfloat16` for the 1.7B (measured on RTX 5090), ~22 GB for the 8B. Peak spikes with long contexts (e.g. very long text or `max_new_tokens=16384`) can push higher. On the 1.7B an RTX 3090 (24 GB) has comfortable headroom; the 8B wants a 24 GB card with little else resident.
 
 **Reference / prev_audio adds runtime VRAM on top of the 12 GB baseline.** Voice Clone's `reference_audio` and Voice Continue's `previous_audio` are encoded to audio codes by the tokenizer, then held in the transformer's KV cache while the new frames are generated. The overhead scales linearly with the prefix duration:
 
