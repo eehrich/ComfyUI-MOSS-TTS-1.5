@@ -1,22 +1,24 @@
 [project]
 name = "ComfyUI-MOSS-TTS-1.5"
 description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS v1.5 — both the 1.7B Local-Transformer (48 kHz) and the 8B full model (24 kHz). Reference-free TTS, zero-shot voice cloning, audio continuation, hard duration control, 31 languages, stereo output."
-version = "0.5.10"
+version = "0.5.11"
 authors = [
   { name = "Enrico Ehrich" },
   { name = "Claude Opus 4.8 (Anthropic)", email = "noreply@anthropic.com" },
 ]
 license = { file = "LICENSE" }
 dependencies = [
-  # The CURRENT MOSS-TTS v1.5 model build (what a fresh install downloads from
-  # HuggingFace) uses processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, which was
-  # introduced in transformers 5.0.0 (it was AUTO_TO_BASE_CLASS_MAPPING in 4.x,
-  # through 4.57). Pin the minimum so ComfyUI-Manager installs a compatible
-  # transformers and the current model build works out of the box. torch /
-  # torchaudio come from ComfyUI.
-  # (Older cached model builds still run on 4.x; the loader also catches the
-  # AttributeError at load time and prints a clear upgrade message either way.)
-  "transformers>=5.0",
+  # No pip deps on purpose. The current MOSS-TTS v1.5 model build adapts to the
+  # installed transformers itself: its remote code guards with
+  #   hasattr(processing_utils, "MODALITY_TO_BASE_CLASS_MAPPING")
+  # and falls back to the 4.x AUTO_TO_BASE_CLASS_MAPPING, so it loads on
+  # transformers 4.x AND 5.x. ComfyUI already ships transformers>=4.50.3, and
+  # torch / torchaudio come from ComfyUI too.
+  # We deliberately do NOT force transformers>=5.0: it would break installs on
+  # Python < 3.10 (every 5.x needs >= 3.10) and needlessly upgrade a working 4.x.
+  # As a safety net the loader still catches a load-time AttributeError and
+  # prints a clear "upgrade transformers" message, in case a future model build
+  # ever drops the guard.
 ]
 
 [project.urls]

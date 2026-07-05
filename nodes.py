@@ -180,13 +180,23 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
         # fire on the ACTUAL error — older cached model code loads fine on 4.x,
         # so we must not gate up-front. Turn the cryptic crash into a clear fix.
         if "MODALITY_TO_BASE_CLASS_MAPPING" in str(e):
+            import sys
             import transformers
+            tv = getattr(transformers, "__version__", "?")
+            py = f"{sys.version_info.major}.{sys.version_info.minor}"
+            if sys.version_info < (3, 10):
+                raise RuntimeError(
+                    f"This MOSS-TTS v1.5 model build needs transformers >= 5.0, "
+                    f"but transformers 5.x requires Python >= 3.10 and your "
+                    f"ComfyUI runs Python {py} (with transformers {tv}). Use a "
+                    f"Python 3.10+ ComfyUI, or pin an older MOSS model build that "
+                    f"runs on transformers 4.x."
+                ) from e
             raise RuntimeError(
                 f"This MOSS-TTS v1.5 model build needs transformers >= 5.0 (it "
                 f"uses processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, added in "
-                f"5.0.0); you have transformers "
-                f"{getattr(transformers, '__version__', '?')}. Upgrade in your "
-                f"ComfyUI Python environment:\n"
+                f"5.0.0); you have transformers {tv} on Python {py}. Upgrade in "
+                f"your ComfyUI Python environment:\n"
                 f"    python -m pip install -U 'transformers>=5.0'"
             ) from e
         raise
