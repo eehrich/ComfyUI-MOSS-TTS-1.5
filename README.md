@@ -26,14 +26,16 @@ The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
 - ComfyUI running on a machine with a CUDA GPU. VRAM in `bfloat16`:
   **~12 GB for the 1.7B Local-Transformer**, **~22 GB for the 8B** full model.
 - Python 3.10+
-- **`transformers >= 5.0.0` (required — v5.5.x recommended).** MOSS-TTS v1.5's
-  model code uses `processing_utils.MODALITY_TO_BASE_CLASS_MAPPING`, a
-  transformers 5.x API (it was `AUTO_TO_BASE_CLASS_MAPPING` in 4.x). A
-  transformers 4.x install fails with `AttributeError: … has no attribute
-  'MODALITY_TO_BASE_CLASS_MAPPING'`. Many ComfyUI setups ship an older
-  transformers — upgrade it in **ComfyUI's own Python env**:
-  `python -m pip install -U "transformers>=5.0"`. (The loader also checks this
-  and raises a clear message.)
+- `transformers` — **newer MOSS-TTS v1.5 model builds need `>= 5.0.0`** (v5.5.x
+  recommended). The current model code uses
+  `processing_utils.MODALITY_TO_BASE_CLASS_MAPPING`, which was **introduced in
+  transformers 5.0.0** (it was `AUTO_TO_BASE_CLASS_MAPPING` in every 4.x,
+  through 4.57). If your downloaded model build needs it and your transformers
+  is older, you get `AttributeError: … has no attribute
+  'MODALITY_TO_BASE_CLASS_MAPPING'` — the loader turns that into a clear
+  "upgrade transformers" message. (Older cached model code still loads fine on
+  4.x, so the loader does **not** block 4.x up-front.) Upgrade in **ComfyUI's
+  own Python env**: `python -m pip install -U "transformers>=5.0"`.
 - **`flash_attn` is NOT required.** MOSS's model code defaults to `flash_attention_2`, but the loader's `attention: auto` detects whether `flash_attn` is installed and falls back to PyTorch's built-in `sdpa` if not — so a plain install runs out of the box. Install `flash-attn` only if you want that backend.
 - `torch`, `torchaudio` (whatever your ComfyUI already ships with)
 - Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** in your Hugging Face cache
@@ -390,7 +392,7 @@ Practical implications:
 
 ## Troubleshooting
 
-- **`AttributeError: module 'transformers.processing_utils' has no attribute 'MODALITY_TO_BASE_CLASS_MAPPING'` (suggests `AUTO_TO_BASE_CLASS_MAPPING`)**: your `transformers` is too old (4.x). MOSS-TTS v1.5's model code needs **transformers >= 5.0** — the constant was restructured at the 4→5 boundary (4.x: `AUTO_TO_BASE_CLASS_MAPPING`, Auto-class keys; 5.x: `MODALITY_TO_BASE_CLASS_MAPPING`, modality keys incl. `audio_tokenizer`). Fix in ComfyUI's Python env: `python -m pip install -U "transformers>=5.0"`.
+- **`AttributeError: module 'transformers.processing_utils' has no attribute 'MODALITY_TO_BASE_CLASS_MAPPING'` (suggests `AUTO_TO_BASE_CLASS_MAPPING`)**: the MOSS model build you downloaded needs **transformers >= 5.0**, but yours is older. `MODALITY_TO_BASE_CLASS_MAPPING` was introduced in **transformers 5.0.0** (every 4.x through 4.57 has only `AUTO_TO_BASE_CLASS_MAPPING`). Fix in ComfyUI's Python env: `python -m pip install -U "transformers>=5.0"`. (If MOSS already works for you on transformers 4.x, your cached model code predates this and doesn't need the upgrade.)
 - **`Can't load the model … pytorch_model.bin`**: your model.safetensors download stalled. Re-run `huggingface_hub.hf_hub_download(repo_id=..., filename="model.safetensors")` explicitly. Often caused by low disk space in `~/.cache/huggingface`.
 - **`std::bad_alloc` on `import torchcodec`**: your installed `torchcodec` version was compiled against a different torch. Either match versions (torchcodec 0.8.x with torch 2.8.x, 0.9.x with 2.9.x, 0.10.x with 2.10.x) or `pip uninstall torchcodec`. The MOSS pipeline itself does **not** require torchcodec.
 - **`build_user_message() got an unexpected keyword argument 'reference_text'`**: fixed in `0.1.1` — MOSS has no reference-text channel. Use `instruction` for style hints, or rely on `reference` (audio) + `language` alone.

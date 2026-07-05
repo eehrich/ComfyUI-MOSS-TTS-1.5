@@ -161,33 +161,6 @@ def _resolve_attention(device: str, requested: str) -> str:
     return req
 
 
-def _require_transformers_5() -> None:
-    """Fail early and clearly on transformers < 5.0.
-
-    MOSS-TTS v1.5's auto-downloaded model code (``processing_moss_tts.py``)
-    references ``processing_utils.MODALITY_TO_BASE_CLASS_MAPPING``, which only
-    exists in transformers 5.x — in 4.x the equivalent constant was
-    ``AUTO_TO_BASE_CLASS_MAPPING`` with a different (Auto-class vs. modality)
-    structure. Without this guard a 4.x install crashes deep inside the remote
-    code with a cryptic ``AttributeError`` (see GitHub issue #1).
-    """
-    import transformers
-    ver = getattr(transformers, "__version__", "") or ""
-    try:
-        major = int(ver.split(".")[0])
-    except (ValueError, IndexError):
-        return  # unrecognised version string — let the load proceed
-    if major < 5:
-        raise RuntimeError(
-            f"MOSS-TTS v1.5 requires transformers >= 5.0, but this environment "
-            f"has transformers {ver}. The model code uses "
-            f"processing_utils.MODALITY_TO_BASE_CLASS_MAPPING (transformers 5.x; "
-            f"it was AUTO_TO_BASE_CLASS_MAPPING in 4.x). Upgrade in your ComfyUI "
-            f"Python environment:\n"
-            f"    python -m pip install -U 'transformers>=5.0'"
-        )
-
-
 def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[str, Any]:
     attn = _resolve_attention(device, attention)
     key = (model_id, device, attn)
@@ -196,10 +169,27 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
 
     dtype, dtype_name = _resolve_dtype(device)
 
-    _require_transformers_5()
     logger.info(f"[MOSS-TTS] loading processor '{model_id}' ...")
     from transformers import AutoModel, AutoProcessor
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    try:
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    except AttributeError as e:
+        # Newer MOSS model builds reference
+        # processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, which was introduced
+        # in transformers 5.0.0 (it was AUTO_TO_BASE_CLASS_MAPPING in 4.x). Only
+        # fire on the ACTUAL error — older cached model code loads fine on 4.x,
+        # so we must not gate up-front. Turn the cryptic crash into a clear fix.
+        if "MODALITY_TO_BASE_CLASS_MAPPING" in str(e):
+            import transformers
+            raise RuntimeError(
+                f"This MOSS-TTS v1.5 model build needs transformers >= 5.0 (it "
+                f"uses processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, added in "
+                f"5.0.0); you have transformers "
+                f"{getattr(transformers, '__version__', '?')}. Upgrade in your "
+                f"ComfyUI Python environment:\n"
+                f"    python -m pip install -U 'transformers>=5.0'"
+            ) from e
+        raise
     processor.audio_tokenizer = processor.audio_tokenizer.to(device)
 
     logger.info(
