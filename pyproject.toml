@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-MOSS-TTS-1.5"
 description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS v1.5 — both the 1.7B Local-Transformer (48 kHz) and the 8B full model (24 kHz). Reference-free TTS, zero-shot voice cloning, audio continuation, hard duration control, 31 languages, stereo output."
-version = "0.5.11"
+version = "0.5.12"
 authors = [
   { name = "Enrico Ehrich" },
   { name = "Claude Opus 4.8 (Anthropic)", email = "noreply@anthropic.com" },
@@ -28,3 +28,5 @@ Model = "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5"
 [tool.comfy]
 PublisherId = "enrico"
 DisplayName = "MOSS-TTS 1.5"
+Icon = "https://raw.githubusercontent.com/eehrich/ComfyUI-MOSS-TTS-1.5/main/assets/icon.png"
+Models = []
