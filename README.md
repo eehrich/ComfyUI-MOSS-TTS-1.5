@@ -2,7 +2,7 @@
 
 ComfyUI custom nodes for **MOSS-TTS v1.5** by [OpenMOSS](https://github.com/OpenMOSS) — supporting **both** model variants:
 [**MOSS-TTS-Local-Transformer-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) (~1.7B, 48 kHz, the fast default) and the full [**MOSS-TTS-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (~8B, 24 kHz). Pick either in the Load Model dropdown — same nodes, same API.
-Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic duration steering, and audio continuation — no fine-tuning, no separate reference-transcript dance.
+Ten lean nodes for reference-free TTS, zero-shot voice cloning, deterministic duration steering, audio continuation, and an encode-once token pipeline — no fine-tuning, no separate reference-transcript dance.
 
 - **Two models, one nodepack** — 1.7B Local-Transformer (48 kHz) or 8B full MOSS-TTS (24 kHz), selected per workflow
 - **31 languages** (with explicit language tag support)
@@ -15,6 +15,7 @@ Five lean nodes for reference-free TTS, zero-shot voice cloning, deterministic d
 - **Text-stream samplers** (v0.5.4) — optional `text_temperature` / `text_top_p` / `text_top_k` on all generate nodes to steer MOSS's dual-stream **text** channel (pacing / alignment) independently of the acoustic `audio_*` samplers.
 - **Robust attention** (v0.5.5) — no `flash_attn` crash on a fresh install; the loader's `attention: auto` falls back to PyTorch's built-in `sdpa` when flash-attn is absent.
 - **Empty-text guard** (v0.5.6) — an empty / whitespace-only prompt fails fast with a clear message instead of making MOSS generate audio until `max_new_tokens` (a multi-minute hang, since it never emits EOS with nothing to say).
+- **Encode-once token pipeline** — a `MOSS_TOKENS` type (raw MOSS audio codes) with five nodes (Encode / Decode / Concat / Save / Load Tokens), optional token inputs on Voice Clone / Voice Continue, and a `tokens` output on every generate node. Encode a voice reference a single time and hand MOSS the codes on every later run — the codec encode drops out of the request entirely. `Decode Tokens` closes the loop: listen to what a token file or a concat result actually holds, without generating. See [Token pipeline (encode once)](#token-pipeline-encode-once).
 - **Text → token estimator** so the token count doesn't have to be a guess
 
 The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
@@ -39,6 +40,7 @@ The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
   in case some future model build ever drops that guard and genuinely needs 5.x.
 - **`flash_attn` is NOT required.** MOSS's model code defaults to `flash_attention_2`, but the loader's `attention: auto` detects whether `flash_attn` is installed and falls back to PyTorch's built-in `sdpa` if not — so a plain install runs out of the box. Install `flash-attn` only if you want that backend.
 - `torch`, `torchaudio` (whatever your ComfyUI already ships with)
+- **`torchcodec` / `soundfile` are NOT required.** torchaudio 2.9+ removed its own I/O backends and routes `torchaudio.save` / `torchaudio.load` through `torchcodec`, which raises `ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec` when it isn't installed — the state most ComfyUI venvs are in. The plugin calls neither: every audio → codes conversion runs in memory through the processor's tensor API (`encode_audios_from_wav`), which only uses `torchaudio.functional.resample`, and generated audio goes straight back out as a ComfyUI `AUDIO` dict. No temp WAV, no I/O backend, nothing to install.
 - Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** in your Hugging Face cache
 
 That's it — no extra CUDA extensions, no custom kernels.
@@ -110,7 +112,7 @@ After a successful install, set the Load Model `attention` input to `auto` (it w
 
 ## Nodes
 
-All five nodes live under the top-level **`MOSS TTS 1.5`** category in the ComfyUI menu.
+All ten nodes live under the top-level **`MOSS TTS 1.5`** category in the ComfyUI menu. The last five are the token nodes — what they are for is explained in [Token pipeline (encode once)](#token-pipeline-encode-once).
 
 ### `MOSS-TTS Load Model`
 
@@ -127,7 +129,7 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 
 `dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).
 
-**Output**: `MOSS_MODEL` — pass to any of the Speak / Voice Clone / Voice Continue nodes.
+**Output**: `MOSS_MODEL` — pass to any of the Speak / Voice Clone / Voice Continue / Encode Tokens nodes.
 
 ### `MOSS-TTS Speak`
 
@@ -152,18 +154,19 @@ Text-to-speech with no reference audio. MOSS uses its trained no-reference path 
 | `text_top_p` | FLOAT | `1.0` | *(optional)* Nucleus (top-p) cutoff for the text stream. Default `1.0` (off). |
 | `text_top_k` | INT | `50` | *(optional)* Top-k cutoff for the text stream. Default `50`. |
 
-**Outputs**: `audio` (stereo at the model's native sample rate) + `tokens_generated` (INT).
+**Outputs**: `audio` (stereo at the model's native sample rate), `tokens_generated` (INT) + `tokens` (`MOSS_TOKENS` — the codes MOSS just emitted, so a voice invented here can be handed to Voice Clone / Voice Continue without ever being encoded from a WAV; see [Token pipeline (encode once)](#token-pipeline-encode-once)).
 
 ### `MOSS-TTS Voice Clone`
 
 <img src="assets/node-voice-clone.jpg" alt="MOSS-TTS Voice Clone node" width="380">
 
-Generates speech from `text` in the voice of `reference_audio`.
+Generates speech from `text` in the voice of `reference_audio` — or of `reference_tokens`, the same reference already encoded.
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
 | `moss_model` | MOSS_MODEL | — | From the loader |
-| `reference_audio` | AUDIO | — | ComfyUI `AUDIO` type (`LoadAudio`, another node's output, etc.) |
+| `reference_audio` | AUDIO | — | ComfyUI `AUDIO` type (`LoadAudio`, another node's output, etc.). Re-encoded by the codec on **every** run. **Give it ~10 s minimum** (10–20 s is the sweet spot) — a ~5 s clip does not carry enough acoustic evidence and comes back as gibberish, see [Reference rules](#reference-rules). Shown as optional only because ComfyUI cannot express "required unless that other input is wired" — ignored when `reference_tokens` is connected. |
+| `reference_tokens` | MOSS_TOKENS | — | *(optional)* Pre-encoded voice reference. Replaces `reference_audio` and skips the codec encode entirely. Same ~10 s minimum — the length rule is about acoustic evidence, not about the format. Wire it from `Encode Tokens` / `Load Tokens` / `Concat Tokens` or from another generate node's `tokens` output — see [Token pipeline (encode once)](#token-pipeline-encode-once). |
 | `text` | STRING | `Hello, this is a test.` | Multiline |
 | `language` | enum | `English` | Full 31-language list: Arabic, Cantonese, Chinese, Czech, Danish, Dutch, English, Finnish, French, German, Greek, Hebrew, Hindi, Hungarian, Italian, Japanese, Korean, Macedonian, Malay, Persian (Farsi), Polish, Portuguese, Romanian, Russian, Spanish, Swahili, Swedish, Tagalog, Thai, Turkish, Vietnamese. See [MOSS README](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) for language codes / flags. |
 | `instruction` | STRING | `""` | Optional free-form style/direction hint. **Not** a reference transcript — MOSS has no reference-text channel. |
@@ -182,18 +185,20 @@ Generates speech from `text` in the voice of `reference_audio`.
 
 - `audio` — stereo AUDIO at the model's native rate (48 kHz for 1.7B, 24 kHz for 8B), ready for `PreviewAudio` / `SaveAudio`
 - `tokens_generated` — INT, number of audio frames actually produced (divide by 12.5 for seconds)
+- `tokens` — `MOSS_TOKENS`, the raw codes MOSS just emitted (`[frames, n_vq]` at 12.5 fps). Feed into the next node's `reference_tokens` / `prev_tokens`, optionally through `Concat Tokens`, to keep the whole chain encode-free.
 
 ### `MOSS-TTS Voice Continue`
 
 <img src="assets/node-voice-continue.jpg" alt="MOSS-TTS Voice Continue node" width="380">
 
-Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** model — it needs the *original text* that produced `previous_audio` so it can locate where in the script the audio stopped, then produce audio for the follow-up text. The node concatenates `previous_text + " " + text` internally and hands the full script + prior audio to MOSS. Voice is inherited from the prior audio (no separate reference).
+Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** model — it needs the *original text* that produced `previous_audio` so it can locate where in the script the audio stopped, then produce audio for the follow-up text. The node concatenates `previous_text + " " + text` internally and hands the full script + prior audio to MOSS. Voice is inherited from the prior audio (no separate reference). Wire `prev_tokens` instead of `previous_audio` to hand MOSS the prior segment's codes directly — no WAV round-trip, no re-encode, frame-exact prefix length.
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
 | `moss_model` | MOSS_MODEL | — | From the loader |
-| `previous_audio` | AUDIO | — | Prior MOSS output (typically another node's `audio` output) |
-| `previous_text` | STRING | `""` | **The exact text that produced `previous_audio`.** Word-for-word match matters — wrong prior text → garbled output (MOSS can't align its script position). |
+| `previous_audio` | AUDIO | — | Prior MOSS output (typically another node's `audio` output). Re-encoded on every run. Shown as optional only because ComfyUI cannot express "required unless that other input is wired" — but still worth wiring alongside `prev_tokens` if you want the `full_audio` output, since without it there is no prior waveform to prepend. |
+| `prev_tokens` | MOSS_TOKENS | — | *(optional)* The previous segment's codes — **not** the `previous_tokens` frame *count* below. Replaces `previous_audio` for conditioning: no WAV round-trip, no re-encode, and the prefix length comes frame-exact from the tensor (`previous_tokens` is then ignored). `previous_text` must transcribe exactly what these codes contain — shorten the token stream (e.g. a sliding window) and you must shorten the transcript to the same point. Wire it from the preceding node's `tokens` output — see [Token pipeline (encode once)](#token-pipeline-encode-once). |
+| `previous_text` | STRING | `""` | **The exact text that produced `previous_audio` / `prev_tokens` — its transcript.** MOSS aligns the spoken prefix against this text to find its script position, so word-for-word match matters (punctuation included). **A mismatched pair produces gibberish, not a slightly-off voice** — if you trim the reference audio, trim this text to the same point. See [Reference rules](#reference-rules). |
 | `text` | STRING | `""` | Follow-up text to speak next. **Must be non-empty** — an empty / whitespace-only prompt raises a clear error instead of hanging (v0.5.6 guard; MOSS never emits EOS with nothing to say and would generate until `max_new_tokens`). |
 | `language` | enum | `English` | Same list as Voice Clone |
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
@@ -202,7 +207,7 @@ Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** mode
 | `target_tokens` | INT | `0` | Duration of the **new** segment in frames. `0` = model decides via EOS. Internally the node adds `previous_tokens` (or measured prefix) before sending to MOSS, because MOSS reads its `tokens` hint as TOTAL (prefix + new) in continuation mode. |
 | `max_new_tokens` | INT | `4096` | Safety cap on the new segment |
 | `seed` | INT | `42` | Random seed |
-| `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). |
+| `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). Ignored when `prev_tokens` is wired — the code tensor already carries the exact length. |
 | `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms at MOSS's fixed 12.5 fps, regardless of the variant's sample rate). MOSS's decoder trims the prefix by sample proportion, and its conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
 | `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
 | `text_temperature` | FLOAT | `1.0` | *(optional)* MOSS v1.5 is dual-stream (text + audio); this samples the **text** stream that drives alignment/pacing, separate from the acoustic `audio_temperature`. Default `1.0` (MOSS default). Lower = steadier pacing/alignment without flattening the voice. |
@@ -215,6 +220,9 @@ Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** mode
 - `tokens_generated` — INT, frames of the new segment.
 - `full_audio` — cumulative: `previous_audio + new` concatenated at the model's native sample rate (48 kHz for 1.7B, 24 kHz for 8B). If `previous_audio` was at a different rate it is resampled to the target before concatenation. Wire into the NEXT Voice Continue's `previous_audio` when the same speaker keeps talking across segments — MOSS's continuation expects the full history so far.
 - `full_tokens` — INT, `previous_tokens + tokens_generated`. Wire into the next `previous_tokens` for a precise chain handoff.
+- `tokens` — `MOSS_TOKENS`, the raw codes of the new segment (`[frames, n_vq]` at 12.5 fps). Wire into the next Continue's `prev_tokens` (directly or through `Concat Tokens`) for an encode-free chain. Note these are the **untrimmed** codes: `head_trim_frames` only shortens the waveform, never the token tensor — see [Caveats](#caveats).
+
+`full_audio` / `full_tokens` need `previous_audio`: in a token-only chain (`prev_tokens` wired, no audio) there is no prior waveform in the graph, so both fall back to the new segment alone.
 
 Same-speaker chain pattern (segment-by-segment via your backend):
 
@@ -240,6 +248,161 @@ Turns a text into a `target_tokens` estimate you can wire straight into `Voice C
 **Output**: `target_tokens` (INT). Formula: `ceil(word_count / (wpm/60) * 12.5)`.
 
 Need slack for punctuation-heavy passages? Chain a ComfyUI math node (`Multiply` / `Add`) after the output — the estimator deliberately has no built-in buffer so you can compose one that scales with the text.
+
+### `MOSS-TTS Encode Tokens`
+
+Turns an `AUDIO` clip into `MOSS_TOKENS` using the model's own codec — the one step the whole token pipeline exists to perform exactly once.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `moss_model` | MOSS_MODEL | — | From the loader. The codec belongs to the model, so the codes are only valid for the variant that produced them. |
+| `audio` | AUDIO | — | Resampled to the model's native rate and loudness-normalised by the processor exactly as Voice Clone's `reference_audio` path does — the resulting codes are interchangeable with it. Two rules the clip has to satisfy, both of which produce **gibberish** when broken: at least **~10 s** long (a ~5 s clip is not enough acoustic evidence), and — if the codes later serve as a `Voice Continue` prefix — the `previous_text` you pass must transcribe **this** clip exactly. See [Reference rules](#reference-rules). |
+
+**Outputs**: `tokens` (`MOSS_TOKENS`, `[frames, n_vq]`) + `frames` (INT; divide by 12.5 for seconds).
+
+### `MOSS-TTS Decode Tokens`
+
+The inverse of `Encode Tokens`: sends `MOSS_TOKENS` back through the model's own vocoder and returns a plain ComfyUI `AUDIO` dict. It completes the token API (encode / **decode** / concat / save / load) and makes a token stream *auditable* — hear what a saved token file actually contains, what reference window a `Concat Tokens` result really builds, or what a `tokens` output sounds like, all **without generating anything**. Worth a listen before a long batch: a reference that sounds wrong here will clone wrong.
+
+Decoding is a pure codec pass — no sampling, no seed, deterministic.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `moss_model` | MOSS_MODEL | — | From the loader. The vocoder is part of the model, so decode with the variant that produced the codes (`n_vq` is validated and a mismatch raises an explicit error). It also sets the output sample rate: 48 kHz for the 1.7B, 24 kHz for the 8B. |
+| `tokens` | MOSS_TOKENS | — | Codes to turn back into audio, `[frames, n_vq]` at 12.5 fps. Any `MOSS_TOKENS` source: `Encode` / `Concat` / `Load Tokens`, or a generate node's `tokens` output. |
+| `return_stereo` | BOOLEAN | `true` | *(optional)* Passed straight to the processor's `decode_audio_codes(return_stereo=…)`. `true` (default) keeps the codec's native **stereo** — identical to what every generate node in this pack outputs, so a decoded `tokens` output lines up with its own `audio`. `false` averages the codec channels into one mono channel: smaller, but no longer bit-identical to the generate nodes' audio. |
+
+**Outputs**: `audio` (AUDIO at the model's native rate) + `frames` (INT, the number of code frames decoded; divide by 12.5 for seconds).
+
+Under the hood this is exactly the call the processor makes behind `processor.decode()` (`_parse_audio_codes` → `decode_audio_codes`), minus the prompt-row segmentation and the `start_length` trim — so decoding a node's `tokens` output reproduces the `audio` it was emitted with. Note the untrimmed-codes caveat below if you compare it byte-for-byte against a `Voice Continue` segment.
+
+### `MOSS-TTS Concat Tokens`
+
+Joins two to four token streams along the time axis. Built for sliding-window references: keep a fixed base anchor (the voice you cloned from) and append the most recent segment(s). Same continuity as concatenating reference WAVs — without touching audio at all: no decode, no re-encode, no resample.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `tokens_a` | MOSS_TOKENS | — | First stream. For a sliding window this is the base-voice anchor. |
+| `tokens_b` | MOSS_TOKENS | — | Appended after `tokens_a` — e.g. the most recent segment. |
+| `tokens_c` | MOSS_TOKENS | — | *(optional)* Appended after `tokens_b`. |
+| `tokens_d` | MOSS_TOKENS | — | *(optional)* Appended after `tokens_c`. |
+
+All inputs must come from the same model — `n_vq` is validated and a mismatch raises with an explicit message.
+
+**Outputs**: `tokens` (concatenated codes) + `frames` (INT total; `frames / 12.5` = seconds, handy for keeping a sliding window inside a duration budget).
+
+### `MOSS-TTS Save Tokens`
+
+Writes `MOSS_TOKENS` to ComfyUI's output directory and returns the absolute path.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `tokens` | MOSS_TOKENS | — | Codes to persist, e.g. from `Encode Tokens` or a generate node's `tokens` output |
+| `filename_prefix` | STRING | `moss_tokens/voice` | Path prefix inside ComfyUI's output directory. Subfolders are created automatically, a counter and `.moss_tokens.pt` are appended: `moss_tokens/voice` → `output/moss_tokens/voice_00001_.moss_tokens.pt` |
+
+File format: a `torch.save` of a plain dict `{format, format_version, audio_codes [frames, n_vq], frames, n_vq, frames_per_second}` — tensors and scalars only, so it loads back with `weights_only=True` (no pickled code, which matters for a file type that travels between machines).
+
+This is an output node: the path is also reported in the ComfyUI UI and can be read back from `/history`, so an HTTP-driven pipeline can encode the base voice in one prompt and reference the file in every later one.
+
+**Output**: `path` (STRING, absolute).
+
+### `MOSS-TTS Load Tokens`
+
+Reads a token file written by `Save Tokens` back into `MOSS_TOKENS`.
+
+| Input | Type | Default | Notes |
+|---|---|---|---|
+| `path` | dropdown | first entry | **File picker.** Lists every `.moss_tokens.pt` found in ComfyUI's **input** and **output** directory, scanned recursively (`Save Tokens` writes into a subfolder by default). Entries from the output directory carry an `output/` prefix, so identical basenames in both directories stay apart. Files written after the page was loaded show up on reload. |
+| `path_override` | STRING | `""` | *(optional)* Explicit path; when non-empty it **replaces** the dropdown selection. Relative to the input directory (output directory as fallback) or absolute. A dropdown cannot accept a link — this can: convert it to an input and wire the `path` output of `Save Tokens` into it to load in a later run what an earlier one wrote. Also the field to fill from an HTTP-driven pipeline. |
+
+When neither directory holds a token file yet, the dropdown shows a single `(no token files found)` entry; running with it selected fails with an explicit message instead of a confusing "file not found" — use `path_override`, or run `Save Tokens` once and reload.
+
+Everything is loaded with `weights_only=True`. The node re-runs when the file's timestamp/size changed, not merely when the path string did — so overwriting a token file does invalidate the cached result. That applies to whichever of the two inputs actually won.
+
+Workflows saved before `path` became a dropdown keep working: the value sits in the same widget slot and is resolved exactly as it was before (input dir, then output dir, absolute as-is), even when it is not one of the listed entries.
+
+**Outputs**: `tokens` (`MOSS_TOKENS`) + `frames` (INT).
+
+---
+
+## Reference rules
+
+Two hard constraints on the *reference* side, both found in live testing. Break either and the output is **gibberish** — not a weaker or slightly-off voice, but unusable audio. Neither raises an error, so if a run comes back as garbled speech, check these first.
+
+**1. The reference text must transcribe the reference audio.**
+MOSS aligns the spoken reference against its transcript to locate its position in the script. Hand it a pair that does not describe the same speech and the alignment is meaningless — the model produces gibberish. In this nodepack the pair is `Voice Continue`'s `previous_text` ↔ `previous_audio` / `prev_tokens`.
+
+> **Rule: the reference text must transcribe the reference audio. If you trim the audio, trim the transcript to the same point.**
+
+Typical ways to break it:
+
+- Shortening a reference WAV (or a token stream, e.g. building a sliding window with `Concat Tokens`) without shortening its transcript accordingly.
+- Pasting the wrong text — a neighbouring paragraph, the *next* segment instead of the previous one, a pre-edit version of the line.
+- Chaining segments and passing only the last segment's audio while `previous_text` still holds the whole scene so far (or vice versa).
+
+`Voice Clone` has **no** reference-transcript channel at all (`instruction` is a style hint, not a transcript), so this rule only concerns the continuation path — but it applies to *any* reference audio/text pair you build on top of these nodes.
+
+**2. A too-short reference produces gibberish too.**
+The model needs enough acoustic evidence to lock onto a voice. **~5 s is not enough** — aim for **at least ~10 s**, with 10–20 s the sweet spot. This applies identically to `reference_audio` and to pre-encoded `reference_tokens` / `prev_tokens` (~125 frames ≈ 10 s at 12.5 fps): the constraint is about the amount of speech, not the format. Very long references work fine quality-wise but cost VRAM in the KV cache — see [Performance & memory](#performance--memory).
+
+`Decode Tokens` is the cheap way to check the first half of a pair: listen to the reference the workflow *actually* assembled before spending a batch on it.
+
+---
+
+## Token pipeline (encode once)
+
+`MOSS_TOKENS` is this pack's own type: a `torch.LongTensor` of shape `[frames, n_vq]` holding **raw MOSS audio codes** at MOSS's fixed 12.5 frames per second — one row is 80 ms of audio, regardless of the model's sample rate.
+
+Two properties of MOSS v1.5 make that directly usable:
+
+- The Hugging Face processor accepts such a tensor **anywhere it accepts a WAV path** (`_resolve_audio_items` in `processing_moss_tts.py` takes a `torch.Tensor` as codes verbatim).
+- `generate()` **emits** codes in exactly that layout.
+
+So a voice reference can be encoded **once** and reused forever, and a generated segment can be fed straight back in without ever becoming a WAV. What disappears is the codec encode at the front of every subsequent request.
+
+### Why it matters
+
+Generation parallelises well across concurrent requests. The reference encode does not — it is one codec pass per request, and it is the part of a cloned request that does not scale. With a short 10–20 s reference that is noise. With a **70–90 s reference window** (e.g. a sliding window over a long narration) it can dominate the call: measured **~24 s of encode at concurrency 8 on an RTX 5090**, while generation itself kept scaling fine. Pre-encoded tokens remove that whole term — the request starts at generation.
+
+### Encode once, chain tokens
+
+```
+once, ever:
+[Load Audio (base voice)] -> [Encode Tokens] -> [Save Tokens] -> path
+
+every run:
+[Load Tokens (base)]  -> tokens_a ┐
+                                  ├-> [Concat Tokens] -> tokens ┐
+[tokens of prev seg]  -> tokens_b ┘                             │
+                                                                v
+                                                 [Voice Clone].reference_tokens
+                                             (or [Voice Continue].prev_tokens)
+                                                                │
+                                                                v
+                                                    audio + tokens (emitted)
+                                                                │
+                                        <───────────────────────┘
+                                        (feeds the next run's tokens_b)
+```
+
+1. **Encode once** — run `Encode Tokens` on the base voice clip, and `Save Tokens` if it should survive a restart. An HTTP-driven pipeline saves in one prompt and just runs `Load Tokens` in every later one. In the UI, pick the file from `Load Tokens`' dropdown (a fresh save shows up after a page reload); over HTTP, put the path into `path_override`.
+2. **Build the reference** — `Concat Tokens` with the base anchor as `tokens_a` and the most recent segment(s) after it.
+3. **Generate** — wire the result into `Voice Clone.reference_tokens` (or `Voice Continue.prev_tokens`) and leave the corresponding audio input unwired.
+4. **Chain** — take that node's `tokens` output as the "recent segment" input of the next `Concat Tokens`. Nothing in the loop touches the codec again.
+
+`Speak` emits `tokens` too, so even a reference-free voice invented on the fly enters the chain without a WAV round-trip.
+
+Every link in that loop can be **auditioned**: hang a `Decode Tokens` → `PreviewAudio` off any `MOSS_TOKENS` connection to hear what is really in it — the saved base voice, the concatenated reference window, the segment just emitted. It costs one codec pass and changes nothing in the chain. Worth doing once when a chain misbehaves, because the two failure modes below are inaudible in the graph but obvious in the ear.
+
+### Caveats
+
+- **A trimmed reference needs a trimmed transcript.** MOSS aligns the spoken reference against its text, so **the reference text must transcribe the reference audio — if you trim the audio, trim the transcript to the same point.** Cutting a token stream (the whole point of a sliding window: drop the oldest frames, append the newest segment) while `Voice Continue`'s `previous_text` still carries the full history is exactly this mistake, and it does not degrade gracefully: the output is **gibberish**, not a slightly-off voice. Same for pasting the wrong paragraph. `Concat Tokens` cannot check this for you — it only sees codes. Keep the text window and the token window in lockstep, and use `Decode Tokens` to hear what the reference actually became. See [Reference rules](#reference-rules).
+- **A too-short reference is gibberish, not a weaker clone.** Pre-encoded tokens do not change how much speech MOSS needs to lock onto a voice: **~5 s is not enough**, give it **~10 s minimum** (≈ 125 frames at 12.5 fps; `frames / 12.5` = seconds on every token node's `frames` output). A sliding window that shrinks below that floor starts producing garbage even though every node in the chain reports success.
+- **`head_trim_frames` does not apply to tokens.** Voice Continue's `tokens` output are the raw emitted codes and cover the **untrimmed** segment — the code path is already frame-exact, while the audio path can only cut by sample proportion, which is what `head_trim_frames` (default `1` ≈ 80 ms) compensates on the waveform. If audio and tokens have to line up 1:1, set `head_trim_frames = 0`. Do **not** trim the previous token tensor to match the trimmed audio — that removes real prefix state MOSS needs.
+- **`full_audio` / `full_tokens` still need `previous_audio`.** With only `prev_tokens` wired there is no prior waveform in the graph, so those two outputs fall back to the new segment alone. Chain `Concat Tokens` on the `tokens` output if you want the cumulative *code* stream.
+- **Loudness normalisation differs subtly** between token-concat and WAV-concat. `Encode Tokens` normalises each clip on its own (exactly as the reference path does), so concatenating two token streams keeps two independently normalised parts, whereas concatenating the WAVs first and encoding once normalises the whole thing together. Both work; the levels are not bit-identical.
+- **Tokens are model-specific.** The 1.7B Local-Transformer and the 8B model need not share an RVQ depth; `n_vq` is validated whenever tokens are used and a mismatch fails with an explicit error. Re-encode the reference when switching between the two.
+- **`Load Tokens` path resolution**: the `path` dropdown lists both ComfyUI directories, output-dir entries prefixed `output/` (that prefix is resolved in the output directory first). Any other value — a dropdown-less string from an older workflow, or `path_override` — resolves against the input directory first, then the output directory; absolute paths are used as-is. An HTTP-driven pipeline that does not want to care about the dropdown should just set `path_override`.
 
 ---
 
@@ -326,6 +489,8 @@ Route both the audio and the `tokens_generated` from the upstream node — the t
 
 For part 3, feed `part 1 + part 2` as the new `previous_text`, wire Voice Continue's own outputs forward, and so on.
 
+The same chain runs **encode-free** if you route the upstream `tokens` output (`MOSS_TOKENS`) into `prev_tokens` instead of routing the audio — see [Token pipeline (encode once)](#token-pipeline-encode-once).
+
 **Or as a standalone Python demo** (what the nodes wrap under the hood):
 
 ```python
@@ -361,6 +526,8 @@ audio = processor.decode(out)[0].audio_codes_list[0]
 torchaudio.save("out.wav", audio.cpu(), 48000)
 ```
 
+Note that this raw-API demo uses the processor's **file** path (`reference=["voice.wav"]`, `torchaudio.save`) and therefore needs a working torchaudio I/O backend — on torchaudio 2.9+ that means `torchcodec` installed. The nodes themselves never take that route (see [Requirements](#requirements)): they hand the processor waveform tensors and get code tensors back.
+
 ---
 
 ## Performance & memory
@@ -385,7 +552,8 @@ VRAM: ~12 GB active weight + activations in `bfloat16` for the 1.7B (measured on
 
 Practical implications:
 
-- **Very long reference audio** (e.g. a 2-minute calibration clip) at Voice Clone time can add several GB before generation even starts. Keep reference clips in the 5–15 s sweet spot.
+- **Very long reference audio** (e.g. a 2-minute calibration clip) at Voice Clone time can add several GB before generation even starts. Keep reference clips in the 10–20 s sweet spot — long enough for the model to lock onto the voice (below ~10 s it returns gibberish, see [Reference rules](#reference-rules)), short enough to stay cheap.
+- **Pre-encoded `reference_tokens` / `prev_tokens` save the encode, not the cache.** They remove the codec pass ([Token pipeline](#token-pipeline-encode-once)) — the prefix still enters the KV cache frame for frame, so the VRAM math above is unchanged. A long token reference costs exactly as much memory as the same reference as audio.
 - **Voice Continue with a growing history** (chaining segment N as the prefix for segment N+1 with cumulative audio) is the biggest failure mode: VRAM drifts up linearly through a scene and eventually OOMs. If you are chaining segments, pass only the **last** segment's audio as `previous_audio` rather than the concatenation of the whole scene so far. The prefix-continuation semantics still work correctly (see [Voice Continue notes](#moss-tts-voice-continue) — MOSS aligns the prefix at the end of `previous_text` inside the concatenated full script), just with a shorter history.
 - Watch `nvidia-smi` during a long Continue chain to spot the drift early; a single-segment prefix stays flat at ~12 GB + a few hundred MB.
 
@@ -393,9 +561,12 @@ Practical implications:
 
 ## Troubleshooting
 
+- **Output is gibberish / Kauderwelsch — reference text and reference audio do not match.** MOSS aligns the spoken reference against its transcript; a pair that does not describe the same speech makes the alignment meaningless and the model emits garbage rather than a degraded-but-usable voice. **Rule: the reference text must transcribe the reference audio — if you trim the audio, trim the transcript to the same point.** In this nodepack that pair is `Voice Continue`'s `previous_text` ↔ `previous_audio` / `prev_tokens`. Classic causes: a shortened reference WAV (or a `Concat Tokens` sliding window) whose transcript was left at full length, and the wrong paragraph pasted into `previous_text`. Nothing raises — the check is on you. Decode the reference with `Decode Tokens` and read `previous_text` alongside it. See [Reference rules](#reference-rules).
+- **Output is gibberish — the reference is too short.** Same symptom, different cause: below roughly **10 s** of reference the model has too little acoustic evidence to lock onto the voice. A ~5 s clip reliably produces gibberish. Use **10–20 s** for `reference_audio` / `reference_tokens` (≈ 125–250 frames at 12.5 fps). Very long references are fine for quality but cost VRAM — see [Performance & memory](#performance--memory).
 - **`AttributeError: module 'transformers.processing_utils' has no attribute 'MODALITY_TO_BASE_CLASS_MAPPING'` (suggests `AUTO_TO_BASE_CLASS_MAPPING`)**: you have an **older cached MOSS model build** — one from before OpenMOSS added the transformers-4.x/5.x compatibility guard — together with transformers < 5.0. `MODALITY_TO_BASE_CLASS_MAPPING` was introduced in **transformers 5.0.0** (every 4.x through 4.57 has only `AUTO_TO_BASE_CLASS_MAPPING`); the old build referenced the 5.0 name unconditionally. Two fixes, either works: **(a)** delete the cached model dir under `~/.cache/huggingface/hub/models--OpenMOSS-Team--MOSS-TTS-*` so a fresh download pulls the **current** build (which guards for both and runs on 4.x too), or **(b)** upgrade transformers in ComfyUI's Python env: `python -m pip install -U "transformers>=5.0"` (needs Python 3.10+).
 - **`Can't load the model … pytorch_model.bin`**: your model.safetensors download stalled. Re-run `huggingface_hub.hf_hub_download(repo_id=..., filename="model.safetensors")` explicitly. Often caused by low disk space in `~/.cache/huggingface`.
 - **`std::bad_alloc` on `import torchcodec`**: your installed `torchcodec` version was compiled against a different torch. Either match versions (torchcodec 0.8.x with torch 2.8.x, 0.9.x with 2.9.x, 0.10.x with 2.10.x) or `pip uninstall torchcodec`. The MOSS pipeline itself does **not** require torchcodec.
+- **`ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec`**: an **outdated copy of this nodepack**. Older versions wrote the reference/previous audio to a temp WAV, which torchaudio 2.9+ can only do through `torchcodec`. Pull the current version — the nodes convert audio to codes in memory now and never call `torchaudio.save`/`load` (see [Requirements](#requirements)). Nothing to install.
 - **`build_user_message() got an unexpected keyword argument 'reference_text'`**: fixed in `0.1.1` — MOSS has no reference-text channel. Use `instruction` for style hints, or rely on `reference` (audio) + `language` alone.
 - **Text like `[pause 1.2s]` is spoken as literal words**: MOSS v1.5 has no built-in pause-marker parser (verified against the source — no `pause`/`silence` tokens in `added_tokens.json`, no bracketed-marker regex in `processing_moss_tts.py`). For deterministic gaps, generate two clips and concatenate with a silence spacer in ComfyUI, or use `Voice Continue` in a chain.
 

@@ -3,7 +3,7 @@
 TTS, zero-shot voice cloning, audio continuation and duration control.
 
 NODE_CLASS_MAPPINGS is re-exported at module top level as a plain import so the
-ComfyUI Registry's static (AST) node parser can discover all five nodes. Do NOT
+ComfyUI Registry's static (AST) node parser can discover all ten nodes. Do NOT
 wrap this import in a try/except with an empty-dict fallback — the parser then
 records the empty dict and the pack shows "No nodes found". ComfyUI's own custom-
 node loader already catches and logs import errors gracefully, so no guard here.
