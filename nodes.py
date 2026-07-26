@@ -484,13 +484,24 @@ def _processor_n_vq(processor: Any) -> int:
 
 
 def _audio_pad_token_id(processor: Any) -> int:
-    """Code value that marks a NON-audio row in the unified [T, n_vq + 1] stream."""
+    """Code value that marks a NON-audio row in the unified [T, n_vq + 1] stream.
+
+    The field name differs per architecture, the value does not:
+      MossTTSLocal (1.7B) exposes audio_pad_token_id AND audio_pad_code
+      MossTTSDelay (8B)   exposes only audio_pad_code
+    Both are 1024. Asking for the first name alone made the 8B fail right after
+    generating — the weights loaded, the tokens came out, and then the frames
+    could not be separated from the prompt rows.
+    """
     config = getattr(processor, "model_config", None)
     pad_id = getattr(config, "audio_pad_token_id", None)
     if pad_id is None:
+        pad_id = getattr(config, "audio_pad_code", None)
+    if pad_id is None:
         raise RuntimeError(
-            "MOSS-TTS: processor.model_config.audio_pad_token_id is unavailable -- "
-            "cannot separate audio frames from prompt rows."
+            "MOSS-TTS: neither processor.model_config.audio_pad_token_id nor "
+            ".audio_pad_code is available -- cannot separate audio frames from "
+            "prompt rows."
         )
     return int(pad_id)
 
