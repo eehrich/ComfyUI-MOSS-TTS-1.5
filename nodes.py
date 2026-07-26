@@ -201,8 +201,33 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
 
     logger.info(f"[MOSS-TTS] loading processor '{model_id}' ...")
     from transformers import AutoModel, AutoProcessor
+    # What the loaders are actually given. Stays the repo id unless the Windows
+    # workaround below has to swap in a resolved local snapshot path.
+    load_id: str = model_id
     try:
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True)
+    except OSError as e:
+        # Windows only, and only for some model builds: MOSS's own
+        # processing_moss_tts.py does
+        #     pretrained_model_name_or_path = Path(pretrained_model_name_or_path)
+        # before handing the value to AutoConfig. On Windows that turns the repo
+        # id "Org/Model" into "Org\Model", and the Hub rejects backslashes:
+        #     Repo id must use alphanumeric chars, '-', '_' or '.'
+        # MOSS-TTS-v1.5 (8B) has that line, MOSS-TTS-Local-Transformer-v1.5
+        # does not — which is why only the 8B fails. Nothing we can fix in
+        # their file (it lives in the HF module cache and is re-downloaded on
+        # every model update), so sidestep it: resolve the repo to a local
+        # directory first. Path() on a real directory is harmless, and
+        # from_pretrained accepts a path just as well as a repo id.
+        if "Repo id must use alphanumeric chars" not in str(e):
+            raise
+        from huggingface_hub import snapshot_download
+        logger.info(
+            "[MOSS-TTS] windows repo-id workaround: resolving "
+            f"'{model_id}' to a local snapshot path"
+        )
+        load_id = snapshot_download(model_id)
+        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True)
     except AttributeError as e:
         # Newer MOSS model builds reference
         # processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, which was introduced
@@ -237,7 +262,7 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
         f"(dtype={dtype_name}, device={device}, attn={attn}) ..."
     )
     model = AutoModel.from_pretrained(
-        model_id, trust_remote_code=True, dtype=dtype,
+        load_id, trust_remote_code=True, dtype=dtype,
         attn_implementation=attn,
     ).to(device)
     model.eval()
