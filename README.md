@@ -349,6 +349,36 @@ The model needs enough acoustic evidence to lock onto a voice. **~5 s is not eno
 
 ---
 
+## Pronunciation control (IPA)
+
+You can spell a word phonetically and MOSS will say it that way — but **only on the 8B**, and only if the surrounding text is long enough. Both halves of that sentence were found by testing; neither is in the upstream docs.
+
+**Model support (measured, German text):**
+
+| Model | Inline IPA | Whole-sentence IPA |
+|---|---|---|
+| `MOSS-TTS-v1.5` (8B) | **yes** | **yes** |
+| `MOSS-TTS-Local-Transformer-v1.5` (1.7B) | no | no |
+
+The 1.7B reads the slashes as characters — `/veːk/` comes out as something like "fek". No amount of text length changes that.
+
+**The trap: too-short text.** With only a sentence or two, voice cloning does not engage properly, and IPA appears not to work *even on the 8B*. We first concluded the model "can't do IPA" from exactly such a test — wrongly. Give it several sentences before judging. This is the same minimum-length effect described under [Reference rules](#reference-rules), now on the *text* side.
+
+**Both forms work on the 8B:**
+
+```
+Er ging den /veːk/ entlang.          # inline — one word corrected, rest normal
+/eːɐ̯ ɡɪŋ deːn veːk ɛntˈlaŋ/          # whole sentence in slashes
+```
+
+Inline is the useful one: it fixes a single stubborn word while leaving the model's own prosody in charge of everything else. It is also the form the upstream README never shows — its single IPA example is English and covers the whole utterance.
+
+**What this is good for.** Some mispronunciations are not random. Compound nouns, loanwords and words whose stress depends on meaning (German `der Weg` /veːk/ vs. `weg` /vɛk/) get read the same wrong way on every retry, so regenerating with a new seed does not help. A phonetic spelling fixes those deterministically. Orthographic respelling ("Lihra" for "Lyra") does **not** work — MOSS ignores it.
+
+**Caveat — bare digits.** In testing, `Test 12345` was spoken as "1212455" and was followed by an invented sentence. Write numbers out (`zwölftausend…`) rather than feeding raw digit strings.
+
+---
+
 ## Token pipeline (encode once)
 
 `MOSS_TOKENS` is this pack's own type: a `torch.LongTensor` of shape `[frames, n_vq]` holding **raw MOSS audio codes** at MOSS's fixed 12.5 frames per second — one row is 80 ms of audio, regardless of the model's sample rate.
