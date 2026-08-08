@@ -73,6 +73,10 @@ MOSS_DEFAULT_SAMPLE_RATE = 48000  # only used as fallback reference in tooltips
 # dict of plain tensors/ints/floats, so it loads back with weights_only=True (no
 # pickle code execution -- important for a file type that travels between machines).
 MOSS_TOKENS_SUFFIX = ".moss_tokens.pt"
+# Code-Wert, der eine NICHT-Audio-Zeile markiert. Bei beiden v1.5-Builds
+# 1024 (MossTTSLocal nennt ihn audio_pad_token_id, MossTTSDelay
+# audio_pad_code); die Codebooks selbst reichen bis 1023.
+MOSS_AUDIO_PAD_CODE = 1024
 MOSS_TOKENS_FORMAT_VERSION = 1
 # MOSSLoadTokens' file dropdown lists BOTH ComfyUI directories. Entries from the
 # output dir (where Save Tokens writes) carry this prefix, so identical basenames
@@ -524,7 +528,25 @@ def _as_token_tensor(value: Any, field: str, n_vq: int | None = None) -> torch.T
             f"n_vq={int(n_vq)}. Tokens are model-specific -- re-encode the reference with "
             "MOSS-TTS Encode Tokens using the model you are generating with."
         )
-    return value.detach().to(dtype=torch.long).cpu().contiguous()
+    tokens = value.detach().to(dtype=torch.long).cpu().contiguous()
+    # Ein Pad-Wert in echten Codes gibt es nicht: die Codebooks reichen bis
+    # 1023, 1024 markiert eine NICHT-Audio-Zeile. Taucht er hier auf, stammt
+    # die Datei aus einer Fassung, die den 8B-Ausgang im Delay-Pattern
+    # weitergereicht hat -- dort tragen die ersten n_vq-1 Frames Fuellwerte in
+    # den oberen Kanaelen. Ohne diesen Riegel laeuft das erst spaeter in einen
+    # IndexError in der Embedding-Schicht des Codecs, wo niemand mehr sieht,
+    # woher er kommt.
+    if tokens.numel() and int(tokens.max()) >= MOSS_AUDIO_PAD_CODE:
+        betroffen = int((tokens >= MOSS_AUDIO_PAD_CODE).any(dim=1).sum())
+        raise ValueError(
+            f"MOSS-TTS: '{field}' enthaelt Fuellwerte ({MOSS_AUDIO_PAD_CODE}) in "
+            f"{betroffen} von {int(tokens.shape[0])} Frames und ist damit kein "
+            "gueltiger Code-Strom. Solche Dateien sind mit einer aelteren "
+            "Fassung dieses Node-Packs entstanden, die den Ausgang des 8B im "
+            "Delay-Pattern weitergereicht hat. Die Tokens neu erzeugen -- der "
+            "Audio-Ausgang war davon nie betroffen."
+        )
+    return tokens
 
 
 def _token_seconds(frames: int) -> float:
@@ -599,6 +621,12 @@ def _extract_generated_codes(processor: Any, outputs: Any) -> torch.Tensor:
         segment with the new audio. Unlike the audio path (which can only trim
         by sample proportion after vocoding) we slice ``[start_length:]``, an
         exact frame-accurate cut.
+
+    On the 8B those rows are in the DELAY PATTERN and are resolved here first,
+    with the processor's own ``apply_de_delay_pattern`` -- see the comment at
+    the call site for why the order matters. The returned tensor is therefore
+    the same representation ``MOSS-TTS Encode Tokens`` produces, which is what
+    makes the two safe to concatenate.
     """
     items = list(outputs or [])
     if not items:
@@ -632,6 +660,38 @@ def _extract_generated_codes(processor: Any, outputs: Any) -> torch.Tensor:
     breaks = torch.where(idx[1:] != idx[:-1] + 1)[0] + 1
     segment_indices = [idx] if breaks.numel() == 0 else list(torch.tensor_split(idx, breaks.cpu().tolist()))
     code_segments = [audio_codes[segment] for segment in segment_indices]
+
+    # The 8B (MossTTSDelay) emits its rows in the DELAY PATTERN: channel c is
+    # offset by c rows, so the first n_vq-1 rows carry audio_pad in the upper
+    # channels and the last n_vq-1 rows carry it in the lower ones. Handing
+    # those out unchanged makes the 'tokens' output unusable as a continuation
+    # prefix: fed back through Concat/Load Tokens the codec's embedding hits
+    # index 1024 (= the pad code) in a table of 1024 entries and raises
+    # IndexError -- the chain dies, it does not degrade.
+    #
+    # At n_vq=32 that is 496 poisoned cells, a 31/30/.../1 triangle. The 1.7B
+    # (MossTTSLocal) has no delay pattern at all, which is why this never
+    # surfaced there -- its processor has no de-delay method either, so the
+    # branch is skipped and its behaviour is bit-identical to before.
+    #
+    # Resolve BEFORE dropping the prompt: start_length counts rows, and after
+    # the reverse it counts frames -- the same quantity, but the reverse needs
+    # the run-out rows to reconstruct the final frames. Cutting first loses
+    # them, and the output ends up n_vq-1 frames SHORTER than the audio of the
+    # same generation (audible as the last two or three words repeating in the
+    # next segment).
+    de_delay = getattr(processor, "apply_de_delay_pattern", None)
+    if callable(de_delay):
+        code_segments = [
+            de_delay(segment) if int(segment.shape[0]) > n_vq - 1 else segment
+            for segment in code_segments
+        ]
+        code_segments = [s for s in code_segments if int(s.shape[0]) > 0]
+        if not code_segments:
+            raise RuntimeError(
+                "MOSS-TTS: after resolving the delay pattern no complete frames "
+                f"remained -- the model emitted fewer than n_vq = {n_vq} rows."
+            )
 
     start_length = int(start_length)
     if start_length > 0 and code_segments:
