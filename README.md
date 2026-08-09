@@ -209,6 +209,8 @@ Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** mode
 | `seed` | INT | `42` | Random seed |
 | `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). Ignored when `prev_tokens` is wired — the code tensor already carries the exact length. |
 | `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms at MOSS's fixed 12.5 fps, regardless of the variant's sample rate). MOSS's decoder trims the prefix by sample proportion, and its conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
+| `target_overshoot_frames` | INT | `50` | Runaway cap: with `target_tokens > 0`, effective `max_new_tokens = min(max_new_tokens, target_tokens + this)`. `50` = 4 s slack. Ignored when `target_tokens = 0`. |
+| `prefix_tail_trim_frames` | INT | `0` | **8B only.** End the prefix this many frames EARLY. `0` = off, `-1` = auto (`n_vq - 1` on the 8B, `0` on the 1.7B). Fixes the glitches in chained 8B continuation — see [The 8B delay seam](#the-8b-delay-seam). |
 | `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
 | `text_temperature` | FLOAT | `1.0` | *(optional)* MOSS v1.5 is dual-stream (text + audio); this samples the **text** stream that drives alignment/pacing, separate from the acoustic `audio_temperature`. Default `1.0` (MOSS default). Lower = steadier pacing/alignment without flattening the voice. |
 | `text_top_p` | FLOAT | `1.0` | *(optional)* Nucleus (top-p) cutoff for the text stream. Default `1.0` (off). |
@@ -349,6 +351,30 @@ The model needs enough acoustic evidence to lock onto a voice. **~5 s is not eno
 
 ---
 
+## The 8B delay seam
+
+Chaining `Voice Continue` on the **8B** produces short glitches — clipped or smeared syllables, a word that dissolves — while the same chain on the 1.7B is clean. It is not sampling luck and not a bad seed: it is a structural property of the 8B's code layout, and one input fixes it.
+
+The 8B (`MossTTSDelay`) writes its codes in a **delay pattern**: codebook *c* is offset by *c* rows, so a block of `T` frames occupies `T + n_vq - 1` rows. For a continuation the processor cuts the last `n_vq - 1` rows off the prefix (`delay_audio_codes_list[-1][:-(n_vq-1), :]`) so the model resumes *mid-diagonal*. The consequence: the last **31** frames of the prefix arrive without their fine codebooks, and the model has to re-invent detail for audio that is already fixed. The codec is not memoryless, so a wrong guess bleeds into frames that were supposed to be settled. Those same last frames are also the *run-out* of the utterance — the quietest, least constrained part of the signal.
+
+`prefix_tail_trim_frames` ends the prefix before that seam. Measured against the reference implementation (identical text, seeds and sampling; judged by ear):
+
+| Trim | Result |
+|---|---|
+| `0` (default) | glitches, clearly worse than the reference |
+| `16` / `30` / `32` / `48` | worse than 31 |
+| **`31`** (= `n_vq - 1`) | **on par with the reference implementation** |
+
+A **one-frame-wide optimum at exactly `n_vq - 1`**. Set the input to `31`, or to `-1` to have the node read `n_vq` off the loaded model.
+
+**What it costs.** `previous_text` deliberately stays whole, so MOSS re-speaks the trimmed ~2.5 s before continuing. That repeat is in the `audio` output *and* in `tokens`, which means `full_audio` (and a `Concat Tokens` chain) contains the overlap **twice**. Cut it before chaining — raise `head_trim_frames`, or trim downstream where you can see the waveform. The node deliberately does not guess where the echo ends: it is a fresh generation, not a copy, so its length only approximates the trim.
+
+**On the 1.7B there is nothing to do.** `MossTTSLocal` has no delay pattern, hence no seam; the same trim sweep (0/6/12/25 frames) was audibly indistinguishable. Leave it at `0` — `-1` resolves to `0` there anyway.
+
+Even with the trim, chained 8B continuation still shows the occasional short error — the reference implementation shows them too, so that residue is the model, not this nodepack.
+
+---
+
 ## Pronunciation control (IPA)
 
 You can spell a word phonetically and MOSS will say it that way — but **only on the 8B**, and only if the surrounding text is long enough. Both halves of that sentence were found by testing; neither is in the upstream docs.
@@ -432,6 +458,7 @@ Every link in that loop can be **auditioned**: hang a `Decode Tokens` → `Previ
 - **`full_audio` / `full_tokens` still need `previous_audio`.** With only `prev_tokens` wired there is no prior waveform in the graph, so those two outputs fall back to the new segment alone. Chain `Concat Tokens` on the `tokens` output if you want the cumulative *code* stream.
 - **Loudness normalisation differs subtly** between token-concat and WAV-concat. `Encode Tokens` normalises each clip on its own (exactly as the reference path does), so concatenating two token streams keeps two independently normalised parts, whereas concatenating the WAVs first and encoding once normalises the whole thing together. Both work; the levels are not bit-identical.
 - **Tokens are model-specific.** The 1.7B Local-Transformer and the 8B model need not share an RVQ depth; `n_vq` is validated whenever tokens are used and a mismatch fails with an explicit error. Re-encode the reference when switching between the two.
+- **8B token files written before 0.6.1 are rejected — re-generate them.** Until 0.6.1 the `tokens` output handed out the 8B's rows still in the [delay pattern](#the-8b-delay-seam), including its pad cells (496 of them at `n_vq = 32`). Fed back through `Concat Tokens` / `Load Tokens` those hit index 1024 in the codec's 1024-entry embedding table: `IndexError`, chain dead. They were also incompatible with `Encode Tokens`, which always produced the resolved representation. Since 0.6.1 both produce the same thing and a file that still carries pad values fails with an explanatory message instead. The **audio** output was never affected, and the 1.7B never was either.
 - **`Load Tokens` path resolution**: the `path` dropdown lists both ComfyUI directories, output-dir entries prefixed `output/` (that prefix is resolved in the output directory first). Any other value — a dropdown-less string from an older workflow, or `path_override` — resolves against the input directory first, then the output directory; absolute paths are used as-is. An HTTP-driven pipeline that does not want to care about the dropdown should just set `path_override`.
 
 ---

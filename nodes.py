@@ -487,6 +487,16 @@ def _processor_n_vq(processor: Any) -> int:
     return int(n_vq)
 
 
+def _uses_delay_pattern(processor: Any) -> bool:
+    """True for the 8B (MossTTSDelay), False for the 1.7B (MossTTSLocal).
+
+    Asked by the presence of ``apply_de_delay_pattern`` rather than by a model
+    name: the same question is answered the same way in _extract_generated_codes,
+    and a name check would need updating for every new build.
+    """
+    return callable(getattr(processor, "apply_de_delay_pattern", None))
+
+
 def _audio_pad_token_id(processor: Any) -> int:
     """Code value that marks a NON-audio row in the unified [T, n_vq + 1] stream.
 
@@ -529,22 +539,20 @@ def _as_token_tensor(value: Any, field: str, n_vq: int | None = None) -> torch.T
             "MOSS-TTS Encode Tokens using the model you are generating with."
         )
     tokens = value.detach().to(dtype=torch.long).cpu().contiguous()
-    # Ein Pad-Wert in echten Codes gibt es nicht: die Codebooks reichen bis
-    # 1023, 1024 markiert eine NICHT-Audio-Zeile. Taucht er hier auf, stammt
-    # die Datei aus einer Fassung, die den 8B-Ausgang im Delay-Pattern
-    # weitergereicht hat -- dort tragen die ersten n_vq-1 Frames Fuellwerte in
-    # den oberen Kanaelen. Ohne diesen Riegel laeuft das erst spaeter in einen
-    # IndexError in der Embedding-Schicht des Codecs, wo niemand mehr sieht,
-    # woher er kommt.
+    # Real codes never carry the pad value: the codebooks go up to 1023 and
+    # 1024 marks a NON-audio row. Seeing it here means the file came from a
+    # build that passed the 8B's output through in the delay pattern, where the
+    # first n_vq-1 frames hold pad in the upper channels. Without this guard it
+    # surfaces much later as an IndexError inside the codec's embedding layer,
+    # where nothing points back to the file that caused it.
     if tokens.numel() and int(tokens.max()) >= MOSS_AUDIO_PAD_CODE:
-        betroffen = int((tokens >= MOSS_AUDIO_PAD_CODE).any(dim=1).sum())
+        affected = int((tokens >= MOSS_AUDIO_PAD_CODE).any(dim=1).sum())
         raise ValueError(
-            f"MOSS-TTS: '{field}' enthaelt Fuellwerte ({MOSS_AUDIO_PAD_CODE}) in "
-            f"{betroffen} von {int(tokens.shape[0])} Frames und ist damit kein "
-            "gueltiger Code-Strom. Solche Dateien sind mit einer aelteren "
-            "Fassung dieses Node-Packs entstanden, die den Ausgang des 8B im "
-            "Delay-Pattern weitergereicht hat. Die Tokens neu erzeugen -- der "
-            "Audio-Ausgang war davon nie betroffen."
+            f"MOSS-TTS: '{field}' holds pad values ({MOSS_AUDIO_PAD_CODE}) in "
+            f"{affected} of {int(tokens.shape[0])} frames, so it is not a valid "
+            "code stream. Such files were produced by an older version of this "
+            "node pack that handed out the 8B's output in the delay pattern. "
+            "Re-generate the tokens -- the audio output was never affected."
         )
     return tokens
 
@@ -680,8 +688,8 @@ def _extract_generated_codes(processor: Any, outputs: Any) -> torch.Tensor:
     # them, and the output ends up n_vq-1 frames SHORTER than the audio of the
     # same generation (audible as the last two or three words repeating in the
     # next segment).
-    de_delay = getattr(processor, "apply_de_delay_pattern", None)
-    if callable(de_delay):
+    if _uses_delay_pattern(processor):
+        de_delay = processor.apply_de_delay_pattern
         code_segments = [
             de_delay(segment) if int(segment.shape[0]) > n_vq - 1 else segment
             for segment in code_segments
@@ -1460,7 +1468,10 @@ class MOSSVoiceContinue:
         "contains only the newly-generated audio (concatenate with the "
         "input if you want the full stream). Wire 'prev_tokens' instead of "
         "'previous_audio' to hand MOSS the prior segment's codes directly -- "
-        "no codec re-encode, frame-exact prefix length."
+        "no codec re-encode, frame-exact prefix length. Chaining this node "
+        "with the 8B build? See 'prefix_tail_trim_frames' -- the delay "
+        "pattern makes the last frames of a prefix the unstable place to "
+        "resume from, and ending it earlier is what fixes the glitches."
     )
 
     @classmethod
@@ -1486,7 +1497,10 @@ class MOSSVoiceContinue:
                             "NOT TRANSCRIBE THE AUDIO, THE OUTPUT IS GARBAGE -- not "
                             "a degraded voice, gibberish. Trimmed the reference WAV? "
                             "Trim this text to the same point. Pasted the wrong "
-                            "paragraph? Same result."
+                            "paragraph? Same result. The ONE deliberate exception is "
+                            "'prefix_tail_trim_frames': there the audio ends earlier "
+                            "while this text stays whole, and MOSS simply says the "
+                            "last words again."
                         ),
                     },
                 ),
@@ -1622,6 +1636,41 @@ class MOSSVoiceContinue:
                         ),
                     },
                 ),
+                "prefix_tail_trim_frames": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 256,
+                        "step": 1,
+                        "tooltip": (
+                            "Cut this many frames off the END of the prefix "
+                            "before handing it to MOSS. 0 = off (unchanged "
+                            "behaviour), -1 = auto (n_vq-1 on the 8B, 0 on "
+                            "the 1.7B). ONLY relevant for the 8B build.\n\n"
+                            "Why: the 8B writes its codes in a DELAY PATTERN "
+                            "and the processor cuts the last n_vq-1 rows of "
+                            "the prefix so the model resumes mid-diagonal. "
+                            "The fine codes of the last 31 prefix frames are "
+                            "therefore missing and the model has to re-invent "
+                            "detail for audio that is already fixed -- the "
+                            "usual source of glitches in chained 8B "
+                            "continuation. Ending the prefix 31 frames "
+                            "earlier avoids that seam. Measured against the "
+                            "reference implementation: 31 is on par with it, "
+                            "0 glitches, and 16/30/32/48 are all worse -- a "
+                            "one-frame-wide optimum at exactly n_vq-1.\n\n"
+                            "The price: previous_text still describes the "
+                            "FULL prefix, so MOSS re-speaks the trimmed "
+                            "~2.5 s at the start of the new segment. That "
+                            "overlap is in 'audio' AND 'tokens', so "
+                            "'full_audio' contains it twice -- cut it (raise "
+                            "head_trim_frames, or trim downstream) before "
+                            "chaining. On the 1.7B there is no delay pattern "
+                            "and no measurable gain: leave it at 0."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "previous_audio": (
@@ -1689,6 +1738,7 @@ class MOSSVoiceContinue:
         previous_tokens: int = 0,
         head_trim_frames: int = 1,
         target_overshoot_frames: int = 50,
+        prefix_tail_trim_frames: int = 0,
         audio_repetition_penalty: float = 1.0,
         text_temperature: float = 1.0,
         text_top_p: float = 1.0,
@@ -1742,6 +1792,37 @@ class MOSSVoiceContinue:
             else _token_seconds(prefix_frames)
         )
 
+        # End the prefix EARLY (see the input's tooltip for the measurement).
+        #
+        # previous_text stays whole on purpose: it describes the untrimmed
+        # prefix, so MOSS re-speaks the trimmed tail before continuing. That
+        # repeat is the known cost, not a bug -- and it is also why the two
+        # length hints react differently below:
+        #   `tokens` is a POSITION on the utterance timeline, and the trim does
+        #       not move the end of the utterance -- only where MOSS resumes.
+        #       It stays prefix_frames + target, i.e. untouched.
+        #   `max_new_tokens` caps NEWLY generated frames, and those now include
+        #       the repeat, so the overshoot cap gets the trim added. Without
+        #       that a tight cap would cut exactly the echo's length off the end.
+        tail_trim = int(prefix_tail_trim_frames)
+        if tail_trim < 0:
+            tail_trim = (_processor_n_vq(processor) - 1) if _uses_delay_pattern(processor) else 0
+        if tail_trim > 0:
+            keep = int(prior_item.shape[0]) - tail_trim
+            if keep > 0:
+                prior_item = prior_item[:keep].contiguous()
+            else:
+                # Trimming everything would leave no prefix at all, i.e. no
+                # continuation. Skipping is the lesser evil, but it must be
+                # visible -- a silently ignored setting reads as "it did not help".
+                logger.warning(
+                    f"[MOSS-TTS] prefix_tail_trim_frames={tail_trim} >= prefix "
+                    f"({int(prior_item.shape[0])} frames) -- not trimming. The "
+                    "prefix is too short to end it that much earlier; feed a "
+                    "longer previous segment or lower the value."
+                )
+                tail_trim = 0
+
         build_kwargs: dict[str, Any] = {
             "text": full_text,
             "language": language,
@@ -1760,8 +1841,13 @@ class MOSSVoiceContinue:
         conversation = [user_msg, assistant_msg]
 
         # max_new_tokens in continuation mode caps NEW frames only (prefix is in input_ids).
-        # target_tokens is defined as "new frames", so the overshoot cap applies directly.
-        effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames)
+        # target_tokens is defined as "new frames", so the overshoot cap applies directly --
+        # plus whatever the tail trim makes MOSS speak twice.
+        effective_max = _apply_overshoot_cap(
+            max_new_tokens,
+            None if tok_hint is None else tok_hint + tail_trim,
+            target_overshoot_frames,
+        )
 
         logger.info(
             f"[MOSS-TTS] continue prev_chars={len(prev)} new_chars={len(new)} "
@@ -1769,6 +1855,7 @@ class MOSSVoiceContinue:
             f"target_new={tok_hint or 'auto'} effective_max={effective_max} "
             f"(user_max={max_new_tokens}, overshoot={target_overshoot_frames}) "
             f"prefix_frames={prefix_frames} ({prefix_source}) "
+            f"prefix_to_moss={int(prior_item.shape[0])} (tail_trim={tail_trim}) "
             f"total_tokens_to_moss={total_tokens or 'auto'} prior_seconds={prior_seconds:.2f} "
             f"rep_penalty={audio_repetition_penalty}"
         )
