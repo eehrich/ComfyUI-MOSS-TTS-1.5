@@ -41,7 +41,7 @@ The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
 - **`flash_attn` is NOT required.** MOSS's model code defaults to `flash_attention_2`, but the loader's `attention: auto` detects whether `flash_attn` is installed and falls back to PyTorch's built-in `sdpa` if not — so a plain install runs out of the box. Install `flash-attn` only if you want that backend.
 - `torch`, `torchaudio` (whatever your ComfyUI already ships with)
 - **`torchcodec` / `soundfile` are NOT required.** torchaudio 2.9+ removed its own I/O backends and routes `torchaudio.save` / `torchaudio.load` through `torchcodec`, which raises `ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec` when it isn't installed — the state most ComfyUI venvs are in. The plugin calls neither: every audio → codes conversion runs in memory through the processor's tensor API (`encode_audios_from_wav`), which only uses `torchaudio.functional.resample`, and generated audio goes straight back out as a ComfyUI `AUDIO` dict. No temp WAV, no I/O backend, nothing to install.
-- Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** in your Hugging Face cache
+- Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** plus its audio tokenizer (**~7 GB** for the 8B, **~8.5 GB** for the 1.7B) in your Hugging Face cache — or nothing at all if you already have both on disk, see [Using a model you already downloaded](#using-a-model-you-already-downloaded)
 
 That's it — no extra CUDA extensions, no custom kernels.
 
@@ -53,6 +53,63 @@ git clone https://github.com/eehrich/ComfyUI-MOSS-TTS-1.5.git MOSS-TTS-ComfyUI
 ```
 
 Restart ComfyUI. The first `MOSS-TTS Load Model` execution downloads the selected checkpoint into your Hugging Face cache (~9.1 GB for the 1.7B, ~17 GB for the 8B).
+
+### Using a model you already downloaded
+
+Nothing has to go through the Hugging Face cache. Two routes, both offline:
+
+**1. Drop it in a model folder.** The pack registers a `moss_tts` model folder with ComfyUI, so anything here shows up in the loader dropdown prefixed `local: `:
+
+```
+ComfyUI/models/moss_tts/MOSS-TTS-v1.5/
+    config.json          <- this is what makes it a model folder
+    model-00001-of-*.safetensors
+    ...
+```
+
+Sharing one model library between several ComfyUI installs is what `extra_model_paths.yaml` is for — the registered name is `moss_tts`:
+
+```yaml
+my_library:
+    base_path: D:/AI/models
+    moss_tts: moss_tts/
+```
+
+A folder is offered as a model when it contains a `config.json` (the file `from_pretrained` needs — weight file names differ per model). The dropdown is rebuilt on every UI refresh, so a model copied in while ComfyUI runs appears without a restart.
+
+**2. Give the loader a path.** `MOSS-TTS Load Model` has an optional `model_path` input. Fill it in and it wins over the dropdown:
+
+```
+D:/AI/models/MOSS-TTS-v1.5
+```
+
+Point it at the folder that *contains* `config.json` — one level too high is the usual mistake, and the error message says so and lists what it did find.
+
+#### Don't forget the audio tokenizer
+
+The model is only half of it. Every MOSS build resolves its audio tokenizer to a **Hugging Face repo id** — the 1.7B names it in `processor_config.json`, the 8B falls back to a constant in its own remote code — so a local model on its own still pulls **7–8.5 GB** off the Hub on first load. Download it once and put it next to the model:
+
+```
+ComfyUI/models/moss_tts/
+    MOSS-TTS-Local-Transformer-v1.5/  <- 48 kHz
+    MOSS-Audio-Tokenizer-v2/          <- 48 kHz, paired automatically
+    MOSS-TTS-v1.5/                    <- 24 kHz
+    MOSS-Audio-Tokenizer/             <- 24 kHz, paired automatically
+```
+
+A folder whose `config.json` says `"model_type": "moss-audio-tokenizer"` is recognised as a tokenizer: it is **not** offered in the model dropdown, and it is paired with a local model by **sample rate** — 48 kHz model to 48 kHz tokenizer, 24 kHz to 24 kHz. That is not pedantry: the two tokenizers have the same quantiser count and codebook size, so the wrong one decodes without any error and simply produces noise. If nothing matches, the tokenizer is left to MOSS (i.e. downloaded) rather than guessed.
+
+Tokenizers are looked for under every `moss_tts` model folder **and right next to the model itself**, so the `model_path` route works the same way:
+
+```
+D:/AI/models/
+    MOSS-TTS-v1.5/          <- model_path points here
+    MOSS-Audio-Tokenizer/   <- found as a sibling
+```
+
+Nothing to configure. If yours lives somewhere neither applies, the loader's `tokenizer_path` input points at it explicitly (and warns if its rate does not fit the model).
+
+For a **Hub** model the tokenizer reference is left exactly as the model ships it — no redirection, nothing changes.
 
 ### Known install gotcha — `configuration_moss_audio_tokenizer.py` dataclass ordering
 
@@ -123,8 +180,10 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
-| `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` — MossTTSLocal, **48 kHz** stereo output, ~12 GB VRAM bf16. `…MOSS-TTS-v1.5 (8B)` — MossTTSDelay, **24 kHz** stereo output, ~22 GB VRAM. Same API, 31 languages, same duration semantics. Each node reads the actual sample rate from `processor.model_config.sampling_rate` at load time and stamps it on all output audio — no manual configuration needed. The `(1.7B)` / `(8B)` suffix is a UI label only; it is stripped before the HF `from_pretrained` call. |
+| `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` — MossTTSLocal, **48 kHz** stereo output, ~12 GB VRAM bf16. `…MOSS-TTS-v1.5 (8B)` — MossTTSDelay, **24 kHz** stereo output, ~22 GB VRAM. Same API, 31 languages, same duration semantics. Each node reads the actual sample rate from `processor.model_config.sampling_rate` at load time and stamps it on all output audio — no manual configuration needed. The `(1.7B)` / `(8B)` suffix is a UI label only; it is stripped before the HF `from_pretrained` call. Entries prefixed `local: ` are folders found under `ComfyUI/models/moss_tts` (or wherever `extra_model_paths.yaml` points that name) and are loaded straight off disk. |
 | `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable |
+| `model_path` | STRING | `""` | *(optional)* Load from this folder instead of the dropdown — the directory that holds `config.json`. Overrides `model_id` when set. See [Using a model you already downloaded](#using-a-model-you-already-downloaded). |
+| `tokenizer_path` | STRING | `""` | *(optional)* Folder of the MOSS audio tokenizer. Leave empty: for a local model the tokenizer matching its sample rate is taken from a `moss_tts` folder or from next to the model, and a Hub model keeps its own reference. Only needed when yours sits somewhere neither applies — without it a local model still downloads 7–8.5 GB. |
 | `attention` | enum | `auto` | *(optional)* Attention backend. `auto` uses `flash_attention_2` only if `flash_attn` is installed, else PyTorch `sdpa` (built-in, no extra deps). Force `sdpa`/`eager` for max compatibility, or `flash_attention_2` if you installed flash-attn. Prevents the "flash_attn is not installed" crash on fresh installs. |
 
 `dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).

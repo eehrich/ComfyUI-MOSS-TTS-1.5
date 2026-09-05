@@ -33,8 +33,10 @@ call (~24 s at concurrency 8 on a 5090) while generation itself scales fine.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +55,283 @@ AVAILABLE_MODELS = [
 DEFAULT_MODEL_LABEL = AVAILABLE_MODELS[0]
 
 
+#: ComfyUI model folder this pack registers. Two things follow from it:
+#: models dropped into <ComfyUI>/models/moss_tts/ appear in the loader
+#: dropdown, and -- because the NAME is registered with folder_paths --
+#: extra_model_paths.yaml can point it at a shared model library outside the
+#: ComfyUI tree. That is the supported way to keep one model collection for
+#: several ComfyUI installs; guessing a folder name never worked because
+#: nothing registered one.
+MOSS_MODEL_FOLDER = "moss_tts"
+#: Marks a dropdown entry as a directory rather than a Hugging Face repo id.
+LOCAL_MODEL_PREFIX = "local: "
+
+
+def _register_model_folder() -> None:
+    """Register models/moss_tts with ComfyUI. No-op outside ComfyUI.
+
+    Never fatal: a failure here costs the dropdown entries, not the pack.
+    """
+    try:
+        import folder_paths  # type: ignore[import-not-found]
+    except ImportError:  # not running inside ComfyUI
+        return
+    try:
+        default = os.path.join(folder_paths.models_dir, MOSS_MODEL_FOLDER)
+        # No is_default=True: an extra_model_paths.yaml entry registers first
+        # (main.py loads the yaml before the custom nodes) and should stay
+        # ahead of the ComfyUI-internal folder, which is what appending does.
+        folder_paths.add_model_folder_path(MOSS_MODEL_FOLDER, default)
+    except Exception as e:  # pragma: no cover - depends on the host
+        logger.warning(
+            f"[MOSS-TTS] could not register the '{MOSS_MODEL_FOLDER}' model "
+            f"folder ({e}); local models will not appear in the dropdown. "
+            f"The model_path input still works."
+        )
+
+
+_register_model_folder()
+
+
+#: config.json model_type of the two audio tokenizers MOSS v1.5 uses. They
+#: are models in the from_pretrained sense but not TTS models, and a user who
+#: keeps a full offline set has one sitting right next to the model.
+TOKENIZER_MODEL_TYPE = "moss-audio-tokenizer"
+
+
+def _is_model_dir(directory: Path) -> bool:
+    """A folder ``from_pretrained`` could load.
+
+    config.json is the marker: weight file names differ per model and per
+    format, but this one file is always needed.
+    """
+    return (directory / "config.json").is_file()
+
+
+def _read_config(directory: Path) -> dict[str, Any]:
+    """A folder's config.json, or ``{}`` if it cannot be read as an object.
+
+    Never raises on content: an unreadable or odd config must not make a model
+    disappear from the dropdown, so every question asked of it below falls back
+    to "don't know".
+    """
+    try:
+        with (directory / "config.json").open("r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _is_audio_tokenizer(directory: Path) -> bool:
+    """Whether a model folder is one of MOSS's audio tokenizers."""
+    return _read_config(directory).get("model_type") == TOKENIZER_MODEL_TYPE
+
+
+def _sampling_rate(directory: Path) -> int | None:
+    """A MOSS model's or audio tokenizer's sample rate, from its config.json.
+
+    This is what decides whether a model and a tokenizer belong together: the
+    v1.5 pair runs at 48 kHz (MOSS-TTS-Local-Transformer + Audio-Tokenizer-v2),
+    the 8B pair at 24 kHz (MOSS-TTS-v1.5 + Audio-Tokenizer). Both keys are
+    top-level; the tokenizers carry sample_rate as well and agree with it.
+    """
+    rate = _read_config(directory).get("sampling_rate")
+    return rate if isinstance(rate, int) else None
+
+
+def _scan_model_roots() -> tuple[dict[str, str], list[str]]:
+    """``({dropdown label: model path}, [audio tokenizer paths])``.
+
+    Scanned on every call so a freshly copied model shows up on a UI refresh,
+    without restarting ComfyUI. The price is one listing per /object_info
+    request; on a sleeping network share that blocks the server thread until
+    the mount times out, so point extra_model_paths.yaml at local storage.
+    """
+    models: dict[str, str] = {}
+    tokenizers: list[str] = []
+    try:
+        import folder_paths  # type: ignore[import-not-found]
+        roots = folder_paths.get_folder_paths(MOSS_MODEL_FOLDER)
+    except Exception:
+        return models, tokenizers
+    for root in roots:
+        try:
+            entries = sorted(Path(root).iterdir())
+        except OSError:  # root does not exist yet, or is unreadable
+            continue
+        for entry in entries:
+            # Inside the loop as well: on a network share a single child can
+            # raise while the listing itself worked (per-folder ACL, a
+            # junction to an offline host). An exception here would escape
+            # INPUT_TYPES and make the node vanish from ComfyUI's node list,
+            # with the reason only in the server log.
+            try:
+                if not _is_model_dir(entry):
+                    continue
+                is_tokenizer = _is_audio_tokenizer(entry)
+            except OSError:
+                continue
+            if is_tokenizer:
+                tokenizers.append(str(entry))
+                continue
+            # setdefault: on a name clash the earlier root wins, which is the
+            # precedence folder_paths itself uses.
+            models.setdefault(f"{LOCAL_MODEL_PREFIX}{entry.name}", str(entry))
+    return models, tokenizers
+
+
+def _tokenizers_beside(model_dir: Path) -> list[str]:
+    """Audio tokenizers sitting next to a model folder.
+
+    The model_path route points at a model ComfyUI knows nothing about; its
+    tokenizer is then typically its sibling, and no registered root would ever
+    see it. Same per-entry guard as _scan_model_roots, for the same reason.
+    """
+    found: list[str] = []
+    try:
+        entries = sorted(model_dir.parent.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        try:
+            if _is_model_dir(entry) and _is_audio_tokenizer(entry):
+                found.append(str(entry))
+        except OSError:
+            continue
+    return found
+
+
+def _local_model_dirs() -> dict[str, str]:
+    """``{dropdown label: absolute path}`` for every local TTS model."""
+    return _scan_model_roots()[0]
+
+
+def _model_choices() -> list[str]:
+    """Dropdown contents: the two Hub models plus whatever lies locally."""
+    return AVAILABLE_MODELS + list(_local_model_dirs())
+
+
 def _repo_id_from_label(label: str) -> str:
+    """Dropdown label -> what ``from_pretrained`` is given.
+
+    A ``local:`` entry resolves to its directory (never parsed out of the
+    label -- a Windows path may itself contain " ("), everything else is the
+    repo id without the size suffix.
+    """
+    if label.startswith(LOCAL_MODEL_PREFIX):
+        path = _local_model_dirs().get(label)
+        if not path:
+            name = label[len(LOCAL_MODEL_PREFIX):]
+            raise RuntimeError(
+                f"MOSS-TTS: local model '{name}' is no longer under any "
+                f"'{MOSS_MODEL_FOLDER}' model folder (moved, renamed, or its "
+                f"config.json is gone). Pick another entry in model_id -- "
+                f"filling in model_path does not help, ComfyUI validates the "
+                f"dropdown value either way."
+            )
+        return path
     return label.split(" (", 1)[0].strip()
+
+
+def _resolve_model_ref(model_id: str, model_path: str = "") -> str:
+    """model_path wins over the dropdown; it is the escape hatch for a model
+    that lives nowhere ComfyUI knows about."""
+    path = (model_path or "").strip().strip('"').strip("'").strip()
+    if not path:
+        return _repo_id_from_label(model_id)
+    resolved = Path(path).expanduser()
+    try:
+        # Canonical case and no "..": _load_bundle caches by this string, and
+        # the same folder typed as "d:\\..." and "D:\\..." would otherwise
+        # load the model a second time into VRAM.
+        resolved = resolved.resolve()
+    except OSError:
+        pass
+    if not resolved.is_dir():
+        raise RuntimeError(
+            f"MOSS-TTS: model_path '{resolved}' is not a directory. Give the "
+            f"folder that holds config.json (a Hugging Face snapshot folder), "
+            f"not a single weight file and not a repo id."
+        )
+    if not (resolved / "config.json").is_file():
+        try:
+            names = sorted(p.name for p in resolved.iterdir())[:6]
+        except OSError:
+            names = []
+        hint = f" It contains: {', '.join(names)}." if names else ""
+        raise RuntimeError(
+            f"MOSS-TTS: model_path '{resolved}' has no config.json, so "
+            f"from_pretrained cannot load it.{hint} Point model_path at the "
+            f"folder that CONTAINS config.json -- stopping one level too high "
+            f"is the usual mistake."
+        )
+    return str(resolved)
+
+
+def _resolve_tokenizer_ref(model_ref: str, tokenizer_path: str = "") -> str | None:
+    """Where the audio tokenizer comes from, or None for "as the model says".
+
+    Loading a model from disk is only half of an offline install: MOSS's
+    processor resolves its audio tokenizer to a Hub repo id -- the 1.7B names
+    it in processor_config.json, the 8B falls back to a constant in its own
+    remote code -- so a local model would still download 7-8.5 GB. The
+    processor takes an explicit ``codec_path`` and prefers it over both, so an
+    audio tokenizer under a registered model folder -- or simply next to the
+    model itself -- is used automatically.
+
+    Matched by sample rate, NOT by "the one lying there": the two MOSS
+    tokenizers have the same quantiser count and codebook size, so the wrong
+    one decodes without any shape error -- straight to noise, at a sample rate
+    the node would then label wrongly (the rate is read off the model config).
+    """
+    path = (tokenizer_path or "").strip().strip('"').strip("'").strip()
+    if path:
+        resolved = Path(path).expanduser()
+        try:
+            resolved = resolved.resolve()
+        except OSError:
+            pass
+        if not _is_model_dir(resolved):
+            raise RuntimeError(
+                f"MOSS-TTS: tokenizer_path '{resolved}' has no config.json. "
+                f"Point it at the MOSS-Audio-Tokenizer folder, i.e. the one "
+                f"that CONTAINS config.json."
+            )
+        want, got = _sampling_rate(Path(model_ref)), _sampling_rate(resolved)
+        if want and got and want != got:
+            # Not refused: an explicit path is an explicit decision. But this
+            # combination cannot work, so it must not be silent.
+            logger.warning(
+                f"[MOSS-TTS] tokenizer_path '{resolved}' runs at {got} Hz "
+                f"while the model expects {want} Hz -- these are the two "
+                f"different MOSS audio tokenizers and the output will be "
+                f"noise. Using it anyway, tokenizer_path was set explicitly."
+            )
+        return str(resolved)
+    if not os.path.isdir(model_ref):
+        # A Hub model: leave its own reference alone, nothing is saved by
+        # redirecting the tokenizer.
+        return None
+    model_dir = Path(model_ref)
+    local = _scan_model_roots()[1]
+    local += [p for p in _tokenizers_beside(model_dir) if p not in local]
+    if not local:
+        return None
+    want = _sampling_rate(model_dir)
+    match = [p for p in local if _sampling_rate(Path(p)) == want]
+    if want is None or not match:
+        logger.warning(
+            f"[MOSS-TTS] none of the local audio tokenizers matches this "
+            f"model's {want} Hz ({', '.join(local)}) -- letting MOSS fetch "
+            f"its own from the Hub. Set tokenizer_path to override."
+        )
+        return None
+    logger.info(f"[MOSS-TTS] using local audio tokenizer '{match[0]}' "
+                f"({want} Hz)")
+    return match[0]
+
+
 DEFAULT_LANGUAGES = (
     "Arabic", "Cantonese", "Chinese", "Czech", "Danish", "Dutch", "English",
     "Finnish", "French", "German", "Greek", "Hebrew", "Hindi", "Hungarian",
@@ -144,7 +421,7 @@ _TEXT_TOP_K_INPUT = (
     },
 )
 
-_MODEL_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+_MODEL_CACHE: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
 
 # Attention backends offered in the loader dropdown. "auto" is the safe
 # default (flash_attention_2 only if flash_attn is installed, else sdpa).
@@ -195,9 +472,10 @@ def _resolve_attention(device: str, requested: str) -> str:
     return req
 
 
-def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[str, Any]:
+def _load_bundle(model_id: str, device: str, attention: str = "auto",
+                 codec_path: str | None = None) -> dict[str, Any]:
     attn = _resolve_attention(device, attention)
-    key = (model_id, device, attn)
+    key = (model_id, device, attn, codec_path)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
 
@@ -205,11 +483,14 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
 
     logger.info(f"[MOSS-TTS] loading processor '{model_id}' ...")
     from transformers import AutoModel, AutoProcessor
+    # MOSS's processor takes codec_path and prefers it over the repo id in
+    # processor_config.json -- that is what makes a fully local load possible.
+    codec_kw = {"codec_path": codec_path} if codec_path else {}
     # What the loaders are actually given. Stays the repo id unless the Windows
     # workaround below has to swap in a resolved local snapshot path.
     load_id: str = model_id
     try:
-        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True, **codec_kw)
     except OSError as e:
         # Windows only, and only for some model builds: MOSS's own
         # processing_moss_tts.py does
@@ -223,7 +504,9 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
         # every model update), so sidestep it: resolve the repo to a local
         # directory first. Path() on a real directory is harmless, and
         # from_pretrained accepts a path just as well as a repo id.
-        if "Repo id must use alphanumeric chars" not in str(e):
+        if "Repo id must use alphanumeric chars" not in str(e) or os.path.isdir(load_id):
+            # A local folder is already what the workaround would produce;
+            # handing it to snapshot_download would only mask the real error.
             raise
         from huggingface_hub import snapshot_download
         logger.info(
@@ -231,7 +514,7 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto") -> dict[st
             f"'{model_id}' to a local snapshot path"
         )
         load_id = snapshot_download(model_id)
-        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True, **codec_kw)
     except AttributeError as e:
         # Newer MOSS model builds reference
         # processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, which was introduced
@@ -298,8 +581,13 @@ class MOSSLoadModel:
         "MOSS-TTS-Local-Transformer-v1.5 (~1.7B, MossTTSLocal architecture, "
         "our default, ~12 GB VRAM in bf16) or MOSS-TTS-v1.5 (~8B, "
         "MossTTSDelay architecture, ~22 GB VRAM, potentially better quality). "
-        "First execution downloads weights (~9 GB / ~16 GB respectively) into "
-        "the Hugging Face cache and moves them to the selected device. "
+        "First execution downloads weights (~9 GB / ~17 GB respectively, plus "
+        "the ~7-8.5 GB audio tokenizer) into "
+        "the Hugging Face cache and moves them to the selected device. Already "
+        "downloaded? Put the model folder under ComfyUI/models/moss_tts (or "
+        "point extra_model_paths.yaml's 'moss_tts' entry at your model "
+        "library) and pick it from the dropdown, or give its path to "
+        "model_path -- nothing is downloaded then. "
         "Subsequent runs reuse the cached bundle -> no re-load penalty. dtype "
         "is picked automatically: bfloat16 on CUDA, float32 on CPU."
     )
@@ -309,7 +597,7 @@ class MOSSLoadModel:
         return {
             "required": {
                 "model_id": (
-                    AVAILABLE_MODELS,
+                    _model_choices(),
                     {
                         "default": DEFAULT_MODEL_LABEL,
                         "tooltip": (
@@ -319,7 +607,11 @@ class MOSSLoadModel:
                             "smaller/faster (~12 GB VRAM), MOSS-TTS-v1.5 (~8B) "
                             "is the deeper MossTTSDelay model (~22 GB VRAM), "
                             "potentially better prosody/expressiveness. Fits "
-                            "on RTX 5090 and 3090 both."
+                            "on RTX 5090 and 3090 both. Entries prefixed "
+                            "'local: ' are model folders found under "
+                            "ComfyUI/models/moss_tts (or wherever "
+                            "extra_model_paths.yaml points that name) -- "
+                            "nothing is downloaded for those."
                         ),
                     },
                 ),
@@ -352,6 +644,42 @@ class MOSSLoadModel:
                         ),
                     },
                 ),
+                # APPENDED, never inserted: ComfyUI restores widget values by
+                # POSITION, so a new input in front of an existing one shifts
+                # every saved workflow's values by one (attention's "auto"
+                # would land in model_path).
+                "model_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "Load from this folder instead of the dropdown. "
+                            "Point it at the directory that holds config.json "
+                            "(a downloaded Hugging Face snapshot). Overrides "
+                            "model_id when set; leave empty to use the "
+                            "dropdown. For a model collection shared between "
+                            "several ComfyUI installs, the tidier route is an "
+                            "extra_model_paths.yaml entry named 'moss_tts' -- "
+                            "those folders show up in the dropdown by "
+                            "themselves."
+                        ),
+                    },
+                ),
+                "tokenizer_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "Folder of the MOSS audio tokenizer, for a fully "
+                            "offline load. Leave empty and the tokenizer "
+                            "matching the model's sample rate is taken from "
+                            "the model folder, or -- for a Hub model -- left "
+                            "to MOSS itself. Needed because a local model "
+                            "alone still pulls its tokenizer (7-8.5 GB) off "
+                            "the Hub: MOSS names it by repo id."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -361,12 +689,15 @@ class MOSSLoadModel:
     FUNCTION = "load"
     CATEGORY = "MOSS TTS 1.5"
 
-    def load(self, model_id: str, device: str, attention: str = "auto"):
+    def load(self, model_id: str, device: str, attention: str = "auto",
+             model_path: str = "", tokenizer_path: str = ""):
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("[MOSS-TTS] CUDA requested but not available; falling back to cpu.")
             device = "cpu"
-        repo_id = _repo_id_from_label(model_id)
-        bundle = _load_bundle(repo_id, device, attention=attention)
+        repo_id = _resolve_model_ref(model_id, model_path)
+        codec_path = _resolve_tokenizer_ref(repo_id, tokenizer_path)
+        bundle = _load_bundle(repo_id, device, attention=attention,
+                              codec_path=codec_path)
         return (bundle,)
 
 
