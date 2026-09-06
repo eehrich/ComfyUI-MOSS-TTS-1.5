@@ -404,6 +404,21 @@ def check_the_tokenizer_is_found_beside_the_model(n, tmp: Path) -> None:
     assert n._resolve_tokenizer_ref(str(model), "") == str(tok)
 
 
+def check_a_tokenizer_beside_the_model_beats_one_in_a_root(n, tmp: Path) -> None:
+    """model_path is the "I know where it is" input, so its neighbour is the
+    more specific answer than a registered root that happens to hold another
+    tokenizer of the same rate -- which may be a different one."""
+    outside = tmp / "library"
+    model = _model_dir(outside, "m", model_type="moss_tts_local", sampling_rate=48000)
+    beside = _model_dir(outside, "tok", model_type="moss-audio-tokenizer",
+                        sampling_rate=48000)
+    root = tmp / "comfy"
+    _model_dir(root, "MOSS-Audio-Tokenizer-v2",
+               model_type="moss-audio-tokenizer", sampling_rate=48000)
+    _stub_folder_paths([str(root)])
+    assert n._resolve_tokenizer_ref(str(model), "") == str(beside)
+
+
 def check_the_tokenizer_is_matched_by_sample_rate(n, tmp: Path) -> None:
     """The 1.7B runs at 48 kHz with Audio-Tokenizer-v2, the 8B at 24 kHz with
     Audio-Tokenizer. Same quantiser count and codebook size, so the wrong one

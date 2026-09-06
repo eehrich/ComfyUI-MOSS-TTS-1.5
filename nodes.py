@@ -314,8 +314,11 @@ def _resolve_tokenizer_ref(model_ref: str, tokenizer_path: str = "") -> str | No
         # redirecting the tokenizer.
         return None
     model_dir = Path(model_ref)
-    local = _scan_model_roots()[1]
-    local += [p for p in _tokenizers_beside(model_dir) if p not in local]
+    # The model's own neighbour first: whoever points model_path at a folder
+    # and puts a tokenizer next to it means THAT one, even when a registered
+    # root happens to hold another of the same rate.
+    local = _tokenizers_beside(model_dir)
+    local += [p for p in _scan_model_roots()[1] if p not in local]
     if not local:
         return None
     want = _sampling_rate(model_dir)

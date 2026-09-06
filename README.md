@@ -100,7 +100,7 @@ ComfyUI/models/moss_tts/
 
 A folder whose `config.json` says `"model_type": "moss-audio-tokenizer"` is recognised as a tokenizer: it is **not** offered in the model dropdown, and it is paired with a local model by **sample rate** — 48 kHz model to 48 kHz tokenizer, 24 kHz to 24 kHz. That is not pedantry: the two tokenizers have the same quantiser count and codebook size, so the wrong one decodes without any error and simply produces noise. If nothing matches, the tokenizer is left to MOSS (i.e. downloaded) rather than guessed.
 
-Tokenizers are looked for under every `moss_tts` model folder **and right next to the model itself**, so the `model_path` route works the same way:
+Tokenizers are looked for under every `moss_tts` model folder **and right next to the model itself**, so the `model_path` route works the same way. The model's own neighbour wins if both offer a match — that is the more specific answer:
 
 ```
 D:/AI/models/
