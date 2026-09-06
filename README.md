@@ -16,6 +16,7 @@ Ten lean nodes for reference-free TTS, zero-shot voice cloning, deterministic du
 - **Robust attention** (v0.5.5) — no `flash_attn` crash on a fresh install; the loader's `attention: auto` falls back to PyTorch's built-in `sdpa` when flash-attn is absent.
 - **Empty-text guard** (v0.5.6) — an empty / whitespace-only prompt fails fast with a clear message instead of making MOSS generate audio until `max_new_tokens` (a multi-minute hang, since it never emits EOS with nothing to say).
 - **Encode-once token pipeline** — a `MOSS_TOKENS` type (raw MOSS audio codes) with five nodes (Encode / Decode / Concat / Save / Load Tokens), optional token inputs on Voice Clone / Voice Continue, and a `tokens` output on every generate node. Encode a voice reference a single time and hand MOSS the codes on every later run — the codec encode drops out of the request entirely. `Decode Tokens` closes the loop: listen to what a token file or a concat result actually holds, without generating. See [Token pipeline (encode once)](#token-pipeline-encode-once).
+- **Models you already have** (v0.6.2) — put a model under `ComfyUI/models/moss_tts` (or point `extra_model_paths.yaml` at your own library) and it appears in the loader dropdown, loaded straight off disk; `model_path` takes a folder anywhere else. The audio tokenizer counts as well: one lying beside the model is paired with it by sample rate, so a complete offline install downloads nothing at all. See [Using a model you already downloaded](#using-a-model-you-already-downloaded).
 - **Text → token estimator** so the token count doesn't have to be a guess
 
 The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
@@ -52,7 +53,7 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/eehrich/ComfyUI-MOSS-TTS-1.5.git MOSS-TTS-ComfyUI
 ```
 
-Restart ComfyUI. The first `MOSS-TTS Load Model` execution downloads the selected checkpoint into your Hugging Face cache (~9.1 GB for the 1.7B, ~17 GB for the 8B).
+Restart ComfyUI. The first `MOSS-TTS Load Model` execution downloads the selected checkpoint into your Hugging Face cache (~9.1 GB for the 1.7B, ~17 GB for the 8B) plus its audio tokenizer (~8.5 / ~7 GB).
 
 ### Using a model you already downloaded
 
@@ -182,9 +183,9 @@ Subsequent workflow queues re-use the already-loaded model — no re-load penalt
 |---|---|---|---|
 | `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` — MossTTSLocal, **48 kHz** stereo output, ~12 GB VRAM bf16. `…MOSS-TTS-v1.5 (8B)` — MossTTSDelay, **24 kHz** stereo output, ~22 GB VRAM. Same API, 31 languages, same duration semantics. Each node reads the actual sample rate from `processor.model_config.sampling_rate` at load time and stamps it on all output audio — no manual configuration needed. The `(1.7B)` / `(8B)` suffix is a UI label only; it is stripped before the HF `from_pretrained` call. Entries prefixed `local: ` are folders found under `ComfyUI/models/moss_tts` (or wherever `extra_model_paths.yaml` points that name) and are loaded straight off disk. |
 | `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable |
+| `attention` | enum | `auto` | *(optional)* Attention backend. `auto` uses `flash_attention_2` only if `flash_attn` is installed, else PyTorch `sdpa` (built-in, no extra deps). Force `sdpa`/`eager` for max compatibility, or `flash_attention_2` if you installed flash-attn. Prevents the "flash_attn is not installed" crash on fresh installs. |
 | `model_path` | STRING | `""` | *(optional)* Load from this folder instead of the dropdown — the directory that holds `config.json`. Overrides `model_id` when set. See [Using a model you already downloaded](#using-a-model-you-already-downloaded). |
 | `tokenizer_path` | STRING | `""` | *(optional)* Folder of the MOSS audio tokenizer. Leave empty: for a local model the tokenizer matching its sample rate is taken from a `moss_tts` folder or from next to the model, and a Hub model keeps its own reference. Only needed when yours sits somewhere neither applies — without it a local model still downloads 7–8.5 GB. |
-| `attention` | enum | `auto` | *(optional)* Attention backend. `auto` uses `flash_attention_2` only if `flash_attn` is installed, else PyTorch `sdpa` (built-in, no extra deps). Force `sdpa`/`eager` for max compatibility, or `flash_attention_2` if you installed flash-attn. Prevents the "flash_attn is not installed" crash on fresh installs. |
 
 `dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).
 
@@ -684,6 +685,8 @@ Practical implications:
 - **`std::bad_alloc` on `import torchcodec`**: your installed `torchcodec` version was compiled against a different torch. Either match versions (torchcodec 0.8.x with torch 2.8.x, 0.9.x with 2.9.x, 0.10.x with 2.10.x) or `pip uninstall torchcodec`. The MOSS pipeline itself does **not** require torchcodec.
 - **`ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec`**: an **outdated copy of this nodepack**. Older versions wrote the reference/previous audio to a temp WAV, which torchaudio 2.9+ can only do through `torchcodec`. Pull the current version — the nodes convert audio to codes in memory now and never call `torchaudio.save`/`load` (see [Requirements](#requirements)). Nothing to install.
 - **`build_user_message() got an unexpected keyword argument 'reference_text'`**: fixed in `0.1.1` — MOSS has no reference-text channel. Use `instruction` for style hints, or rely on `reference` (audio) + `language` alone.
+- **It downloads anyway, although the model is on disk.** The model is only half of the install — MOSS fetches its audio tokenizer separately, by repo id. On a successful local load the log says `[MOSS-TTS] using local audio tokenizer '…' (48000 Hz)`. If it says `none of the local audio tokenizers matches this model's … Hz` instead, the one you have belongs to the other model: **`MOSS-Audio-Tokenizer-v2` (48 kHz) goes with the 1.7B, `MOSS-Audio-Tokenizer` (24 kHz) with the 8B.** Nothing is guessed there on purpose — the wrong codec decodes without an error and produces noise.
+- **No `local: …` entries in the dropdown.** The folder must contain `config.json` *directly* — a Hugging Face snapshot nested one level deeper is not seen, and neither is a repo you only cloned the pointers of. The list is rebuilt on every UI refresh, so reload the browser rather than restarting ComfyUI. If nothing helps, `model_path` bypasses the dropdown entirely and its error message says what it did find.
 - **Text like `[pause 1.2s]` is spoken as literal words**: MOSS v1.5 has no built-in pause-marker parser (verified against the source — no `pause`/`silence` tokens in `added_tokens.json`, no bracketed-marker regex in `processing_moss_tts.py`). For deterministic gaps, generate two clips and concatenate with a silence spacer in ComfyUI, or use `Voice Continue` in a chain.
 
 ---
