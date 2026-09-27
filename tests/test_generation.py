@@ -252,9 +252,11 @@ def check_network_paths_are_refused(n) -> None:
         except FileNotFoundError:
             return
         raise AssertionError("//tmp/... was refused outside Windows")
+    tokens = torch.zeros(4, N_VQ, dtype=torch.long)
     resolvers = {"token file": n._resolve_tokens_path,
                  "model_path": lambda p: n._resolve_model_ref("x", p),
-                 "tokenizer_path": lambda p: n._resolve_tokenizer_ref("m", p)}
+                 "tokenizer_path": lambda p: n._resolve_tokenizer_ref("m", p),
+                 "filename_prefix": lambda p: n.MOSSSaveTokens().save(tokens, p)}
     for raw in (r"\\invalid.invalid\share\x.moss_tokens.pt",
                 "//invalid.invalid/share/x.moss_tokens.pt",
                 r"\/invalid.invalid/share/x.moss_tokens.pt",   # Windows: UNC as well

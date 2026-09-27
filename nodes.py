@@ -2773,6 +2773,8 @@ class MOSSSaveTokens:
     CATEGORY = "MOSS TTS 1.5"
 
     def save(self, tokens: torch.Tensor, filename_prefix: str) -> dict[str, Any]:
+        # get_save_image_path realpath()s the prefix before refusing an escape
+        _refuse_network_path(filename_prefix, "filename_prefix")
         tensor = _as_token_tensor(tokens, "tokens")
         # get_save_image_path is ComfyUI's shared "resolve prefix + counter" helper
         # (SaveImage / SaveAudio use it too): it creates subfolders and blocks

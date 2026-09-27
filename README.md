@@ -313,6 +313,8 @@ Need slack for punctuation-heavy passages? Chain a ComfyUI math node (`Multiply`
 
 ### `MOSS-TTS Encode Tokens`
 
+<img src="assets/node-encode-tokens.jpg" alt="MOSS-TTS Encode Tokens node" width="380">
+
 Turns an `AUDIO` clip into `MOSS_TOKENS` using the model's own codec — the one step the whole token pipeline exists to perform exactly once.
 
 | Input | Type | Default | Notes |
@@ -323,6 +325,8 @@ Turns an `AUDIO` clip into `MOSS_TOKENS` using the model's own codec — the one
 **Outputs**: `tokens` (`MOSS_TOKENS`, `[frames, n_vq]`) + `frames` (INT; divide by 12.5 for seconds).
 
 ### `MOSS-TTS Decode Tokens`
+
+<img src="assets/node-decode-tokens.jpg" alt="MOSS-TTS Decode Tokens node" width="380">
 
 The inverse of `Encode Tokens`: sends `MOSS_TOKENS` back through the model's own vocoder and returns a plain ComfyUI `AUDIO` dict. It completes the token API (encode / **decode** / concat / save / load) and makes a token stream *auditable* — hear what a saved token file actually contains, what reference window a `Concat Tokens` result really builds, or what a `tokens` output sounds like, all **without generating anything**. Worth a listen before a long batch: a reference that sounds wrong here will clone wrong.
 
@@ -340,6 +344,8 @@ Under the hood this is exactly the call the processor makes behind `processor.de
 
 ### `MOSS-TTS Concat Tokens`
 
+<img src="assets/node-concat-tokens.jpg" alt="MOSS-TTS Concat Tokens node" width="380">
+
 Joins two to four token streams along the time axis. Built for sliding-window references: keep a fixed base anchor (the voice you cloned from) and append the most recent segment(s). Same continuity as concatenating reference WAVs — without touching audio at all: no decode, no re-encode, no resample.
 
 | Input | Type | Default | Notes |
@@ -355,6 +361,8 @@ All inputs must come from the same model — `n_vq` is validated and a mismatch 
 
 ### `MOSS-TTS Save Tokens`
 
+<img src="assets/node-save-tokens.jpg" alt="MOSS-TTS Save Tokens node" width="380">
+
 Writes `MOSS_TOKENS` to ComfyUI's output directory and returns the absolute path.
 
 | Input | Type | Default | Notes |
@@ -369,6 +377,8 @@ This is an output node: the path is also reported in the ComfyUI UI and can be r
 **Output**: `path` (STRING, absolute).
 
 ### `MOSS-TTS Load Tokens`
+
+<img src="assets/node-load-tokens.jpg" alt="MOSS-TTS Load Tokens node" width="380">
 
 Reads a token file written by `Save Tokens` back into `MOSS_TOKENS`.
 
@@ -520,7 +530,7 @@ Every link in that loop can be **auditioned**: hang a `Decode Tokens` → `Previ
 - **Tokens are model-specific.** The 1.7B Local-Transformer and the 8B model need not share an RVQ depth; `n_vq` is validated whenever tokens are used and a mismatch fails with an explicit error. Re-encode the reference when switching between the two.
 - **8B token files written before 0.6.1 are rejected — re-generate them.** Until 0.6.1 the `tokens` output handed out the 8B's rows still in the [delay pattern](#the-8b-delay-seam), including its pad cells (496 of them at `n_vq = 32`). Fed back through `Concat Tokens` / `Load Tokens` those hit index 1024 in the codec's 1024-entry embedding table: `IndexError`, chain dead. They were also incompatible with `Encode Tokens`, which always produced the resolved representation. Since 0.6.1 both produce the same thing and a file that still carries pad values fails with an explanatory message instead. The **audio** output was never affected, and the 1.7B never was either.
 - **`Load Tokens` path resolution**: the `path` dropdown lists both ComfyUI directories, output-dir entries prefixed `output/` (that prefix is resolved in the output directory first). Any other value — a dropdown-less string from an older workflow, or `path_override` — resolves against the input directory first, then the output directory; absolute paths are used as-is. An HTTP-driven pipeline that does not want to care about the dropdown should just set `path_override`.
-- **No network paths in path inputs (Windows).** `path_override`, `model_path` and `tokenizer_path` refuse UNC paths (`\\host\share\…`): Windows would hand that host your NTLM hash as soon as the path is touched, and a shared workflow must not be able to do that. A share mapped to a drive letter works.
+- **No network paths in path inputs (Windows).** `path_override`, `model_path`, `tokenizer_path` and Save Tokens' `filename_prefix` refuse UNC paths (`\\host\share\…`): Windows would hand that host your NTLM hash as soon as the path is touched, and a shared workflow must not be able to do that. A share mapped to a drive letter works, and so does a path inside ComfyUI's own input/output directory, which may itself be a share.
 
 ---
 
@@ -543,7 +553,7 @@ Practical uses:
 
 ### Full pipeline — Speak → Clone → Continue (downloadable)
 
-The bundled [`example_workflows/MOSS-TTS_Full.json`](example_workflows/MOSS-TTS_Full.json) wires the whole chain end to end (ComfyUI-Manager also lists it under this pack's example workflows). Drop the JSON on the ComfyUI canvas — or **Workflow → Open** — to load it, then swap the two `String (Multiline)` nodes for your own text; everything else is pre-wired.
+The bundled [`example_workflows/MOSS-TTS_Full.json`](example_workflows/MOSS-TTS_Full.json) wires the whole chain end to end (ComfyUI-Manager also lists it under this pack's example workflows). Drop the JSON on the ComfyUI canvas — or **Workflow → Open** — to load it, then swap the two `Text (Multiline)` nodes (`String (Multiline)` in older ComfyUI) for your own text; everything else is pre-wired.
 
 ![Full MOSS-TTS pipeline](assets/workflow-full.jpg)
 
@@ -556,7 +566,7 @@ This is the canonical "create a voice, then narrate a multi-segment passage in i
 
 ### Reference-free narration & single voice clone
 
-**Reference-free narration** — Load Model → Speak, with an Estimate Tokens node feeding the duration hint and a Preview/Save on the output:
+**Reference-free narration** — Load Model → Speak, with an Estimate Tokens node feeding the duration hint, a Preview on the audio and `Save Tokens` keeping the voice's codes for later clones:
 
 ![MOSS-TTS Speak workflow](assets/workflow-speak.jpg)
 
