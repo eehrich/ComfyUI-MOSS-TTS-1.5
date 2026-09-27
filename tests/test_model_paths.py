@@ -462,6 +462,114 @@ def check_an_explicit_tokenizer_of_the_wrong_rate_is_not_silent(n, tmp: Path) ->
     assert any("24000" in r and "48000" in r for r in records), records
 
 
+def check_only_one_model_stays_cached(n, tmp: Path) -> None:
+    """Every model ever loaded used to stay in the cache -- 1.7B then 8B was
+    ~34 GB, and nothing in ComfyUI reaches this dict to free it. Forgetting the
+    key is not enough: ComfyUI's RAM-pressure cache still holds the loader's
+    output, which IS this dict. A node handed it later loads it again."""
+    attn = n._resolve_attention("cpu", "sdpa")
+    first = {"model": object(), "processor": object(), "device": "cpu",
+             "load_args": ("first", "cpu", attn, None)}
+    n._MODEL_CACHE[first["load_args"]] = first
+    fake, stop = _fake_transformers()
+    saved = sys.modules.get("transformers")
+    sys.modules["transformers"] = fake
+    try:
+        try:
+            n._load_bundle("second", "cpu", "sdpa")
+        except stop:
+            pass
+        assert first["load_args"] not in n._MODEL_CACHE, list(n._MODEL_CACHE)
+        assert "model" not in first and "processor" not in first, sorted(first)
+    finally:
+        n._MODEL_CACHE.clear()
+        _restore("transformers", saved)
+
+    loads: list[tuple] = []
+    saved_load = n._load_bundle
+    n._load_bundle = lambda *args: loads.append(args) or {"processor": "reloaded"}
+    try:
+        assert n._live_bundle(first) == {"processor": "reloaded"}
+        assert loads == [("first", "cpu", attn, None)], loads
+        live = {"processor": "kept"}
+        assert n._live_bundle(live) is live and len(loads) == 1
+    finally:
+        n._load_bundle = saved_load
+
+
+def check_transformers_5_4_config_error_names_the_fix(n, tmp: Path) -> None:
+    """transformers 5.4.0 / 5.5.0 cannot read either MOSS tokenizer config; the
+    raw TypeError says nothing about the version that fixes it."""
+    def fake(*excs):
+        pending = list(excs)
+
+        class _Processor:
+            @staticmethod
+            def from_pretrained(load_id, **kw):
+                raise pending.pop(0)
+        mod = types.ModuleType("transformers")
+        mod.AutoProcessor = mod.AutoModel = _Processor
+        mod.__version__ = "5.5.0"
+        return mod
+
+    config_error = TypeError(
+        "non-default argument 'sampling_rate' follows default argument 'problem_type'")
+    hub = types.ModuleType("huggingface_hub")
+    hub.snapshot_download = lambda repo_id, **kw: str(tmp)
+    saved = sys.modules.get("transformers")
+    saved_hub = sys.modules.get("huggingface_hub")
+    try:
+        sys.modules["transformers"] = fake(config_error)
+        _raises(lambda: n._load_bundle("some/model", "cpu", "sdpa"), contains="5.5.1")
+        # The 8B on Windows: the first call dies on the repo id, the retry is
+        # where the config is read.
+        sys.modules["huggingface_hub"] = hub
+        sys.modules["transformers"] = fake(
+            OSError("Repo id must use alphanumeric chars or '-', '_', '.'"), config_error)
+        _raises(lambda: n._load_bundle("some/model", "cpu", "sdpa"), contains="5.5.1")
+        sys.modules["transformers"] = fake(TypeError("something else entirely"))
+        try:
+            n._load_bundle("some/model", "cpu", "sdpa")
+        except TypeError as e:
+            assert "something else" in str(e), e
+        else:
+            raise AssertionError("an unrelated TypeError was swallowed")
+    finally:
+        n._MODEL_CACHE.clear()
+        _restore("transformers", saved)
+        _restore("huggingface_hub", saved_hub)
+
+
+def check_tokenizer_path_must_be_an_audio_tokenizer(n, tmp: Path) -> None:
+    """A TTS model folder has a config.json too -- MOSS would try to load it
+    as a codec and fail somewhere deep inside."""
+    model = _model_dir(tmp, "m", model_type="moss_tts_local", sampling_rate=48000)
+    other_model = _model_dir(tmp, "other", model_type="moss_tts_local", sampling_rate=48000)
+    _stub_folder_paths([])
+    _raises(lambda: n._resolve_tokenizer_ref(str(model), str(other_model)),
+            contains="not a MOSS audio tokenizer")
+
+
+def check_a_hub_model_is_rate_checked_from_the_hf_cache(n, tmp: Path) -> None:
+    """A Hub model has no folder to read its rate from, so a wrong explicit
+    tokenizer used to pass without a word. The HF cache holds its config."""
+    snapshot = _model_dir(tmp / "hub", "snapshot", model_type="moss_tts_delay",
+                          sampling_rate=24000)
+    tok = _model_dir(tmp, "tok", model_type="moss-audio-tokenizer", sampling_rate=48000)
+    hub = types.ModuleType("huggingface_hub")
+    hub.try_to_load_from_cache = lambda repo, name: (
+        str(snapshot / name) if repo == "OpenMOSS-Team/MOSS-TTS-v1.5" else None)
+    saved = sys.modules.get("huggingface_hub")
+    sys.modules["huggingface_hub"] = hub
+    _stub_folder_paths([])
+    records = _capture_log()
+    try:
+        assert n._resolve_tokenizer_ref("OpenMOSS-Team/MOSS-TTS-v1.5", str(tok)) == str(tok)
+    finally:
+        _restore("huggingface_hub", saved)
+    assert any("24000" in r and "48000" in r for r in records), records
+
+
 def check_the_codec_path_is_part_of_the_model_cache_key(n, tmp: Path) -> None:
     """Two tokenizers, one model: without codec_path in the key the second
     load returns the first bundle -- the wrong codec, straight from VRAM."""

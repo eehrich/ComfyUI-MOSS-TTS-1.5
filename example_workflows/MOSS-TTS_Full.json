@@ -44,7 +44,7 @@
         "Node name for S&R": "MOSSSpeak"
       },
       "widgets_values": [
-        "Hallo das ist ein Text um eine Stimme zu generieren. Diese wird benutzt um eine Stimme zu clonen.",
+        "Hallo, das ist ein Text, um eine Stimme zu generieren. Diese Stimme wird anschließend benutzt, um sie zu klonen. Damit das zuverlässig klappt, braucht die Referenz mindestens zehn Sekunden Sprache, besser fünfzehn bis zwanzig.",
         "German",
         "",
         1.7,

@@ -1,10 +1,12 @@
 """ComfyUI nodes for OpenMOSS MOSS-TTS v1.5.
 
-Supports both variants (selected in the Load Model dropdown): the 1.7B
-Local-Transformer (48 kHz, default) and the 8B full MOSS-TTS (24 kHz).
+Supports both variants (selected in the Load Model dropdown): the
+Local-Transformer (~4.5B parameters, 48 kHz stereo, default -- labelled "(1.7B)"
+in the dropdown, a name saved workflows depend on) and the 8B full MOSS-TTS
+(24 kHz mono).
 
 Ten nodes:
-  - MOSSLoadModel:        loads the processor + model once, caches by (model_id, device).
+  - MOSSLoadModel:        loads the processor + model once and keeps ONE model cached.
   - MOSSSpeak:            MOSS_MODEL + text (no reference) -> AUDIO in a MOSS default voice.
   - MOSSVoiceClone:       MOSS_MODEL + reference AUDIO or MOSS_TOKENS + text -> cloned AUDIO out.
   - MOSSVoiceContinue:    MOSS_MODEL + previous AUDIO or MOSS_TOKENS + follow-up text -> continuation.
@@ -33,6 +35,8 @@ call (~24 s at concurrency 8 on a 5090) while generation itself scales fine.
 
 from __future__ import annotations
 
+import gc
+import inspect
 import json
 import logging
 import math
@@ -140,6 +144,23 @@ def _sampling_rate(directory: Path) -> int | None:
     return rate if isinstance(rate, int) else None
 
 
+def _model_sampling_rate(model_ref: str) -> int | None:
+    """Sample rate of a model given as a folder OR as a Hub repo id.
+
+    A repo id is read from the Hugging Face cache, which holds it once the model
+    was loaded before. Never downloaded: None -- there is nothing to compare
+    against until the load itself fetches it.
+    """
+    if os.path.isdir(model_ref):
+        return _sampling_rate(Path(model_ref))
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        cached = try_to_load_from_cache(model_ref, "config.json")
+    except Exception:
+        return None
+    return _sampling_rate(Path(cached).parent) if isinstance(cached, str) else None
+
+
 def _scan_model_roots() -> tuple[dict[str, str], list[str]]:
     """``({dropdown label: model path}, [audio tokenizer paths])``.
 
@@ -234,12 +255,29 @@ def _repo_id_from_label(label: str) -> str:
     return label.split(" (", 1)[0].strip()
 
 
+def _refuse_network_path(raw: str, what: str) -> None:
+    """Refuse a UNC or device path typed into a free-text path input.
+
+    Windows opens an SMB connection for \\\\host\\share -- and for \\/ or /\\,
+    which it reads the same way -- and hands that host the user's NTLM hash, as
+    soon as anything stats the path. A shared workflow must not be able to point
+    there. \\??\\UNC\\ is the NT spelling of the same (Python <= 3.12 hands it to
+    Windows as is). On other systems //x is an ordinary local path.
+    """
+    if os.name == "nt" and raw.replace("/", "\\").startswith(("\\\\", "\\??\\")):
+        raise ValueError(
+            f"MOSS-TTS: network or device paths are not accepted for {what}: {raw!r}. "
+            "Use a local path -- a share mapped to a drive letter works too."
+        )
+
+
 def _resolve_model_ref(model_id: str, model_path: str = "") -> str:
     """model_path wins over the dropdown; it is the escape hatch for a model
     that lives nowhere ComfyUI knows about."""
     path = (model_path or "").strip().strip('"').strip("'").strip()
     if not path:
         return _repo_id_from_label(model_id)
+    _refuse_network_path(path, "model_path")
     resolved = Path(path).expanduser()
     try:
         # Canonical case and no "..": _load_bundle caches by this string, and
@@ -287,6 +325,7 @@ def _resolve_tokenizer_ref(model_ref: str, tokenizer_path: str = "") -> str | No
     """
     path = (tokenizer_path or "").strip().strip('"').strip("'").strip()
     if path:
+        _refuse_network_path(path, "tokenizer_path")
         resolved = Path(path).expanduser()
         try:
             resolved = resolved.resolve()
@@ -298,7 +337,16 @@ def _resolve_tokenizer_ref(model_ref: str, tokenizer_path: str = "") -> str | No
                 f"Point it at the MOSS-Audio-Tokenizer folder, i.e. the one "
                 f"that CONTAINS config.json."
             )
-        want, got = _sampling_rate(Path(model_ref)), _sampling_rate(resolved)
+        if not _is_audio_tokenizer(resolved):
+            # A TTS model folder passes the config.json test too, and MOSS would
+            # then try to load it as a codec and fail somewhere deep inside.
+            raise RuntimeError(
+                f"MOSS-TTS: tokenizer_path '{resolved}' is a model folder, but "
+                f"not a MOSS audio tokenizer (its config.json does not say "
+                f"\"model_type\": \"{TOKENIZER_MODEL_TYPE}\"). Point it at "
+                f"MOSS-Audio-Tokenizer-v2 (1.7B) or MOSS-Audio-Tokenizer (8B)."
+            )
+        want, got = _model_sampling_rate(model_ref), _sampling_rate(resolved)
         if want and got and want != got:
             # Not refused: an explicit path is an explicit decision. But this
             # combination cannot work, so it must not be silent.
@@ -347,7 +395,7 @@ MOSS_FRAMES_PER_SECOND = 12.5
 # 8B MOSS-TTS uses 24000 Hz. Read from processor.model_config at load time and
 # stored in each bundle -- all output audio dicts carry the actual rate so
 # downstream ComfyUI nodes play back at the right speed.
-MOSS_DEFAULT_SAMPLE_RATE = 48000  # only used as fallback reference in tooltips
+MOSS_DEFAULT_SAMPLE_RATE = 48000  # fallback when a model config carries no sampling_rate
 
 # On-disk format for MOSS_TOKENS (MOSSSaveTokens / MOSSLoadTokens): a torch.save'd
 # dict of plain tensors/ints/floats, so it loads back with weights_only=True (no
@@ -385,7 +433,11 @@ _REP_PENALTY_INPUT = (
             "TTS failure modes -- droning, tempo freeze, smeared or "
             "looping syllables -- while leaving normal prosody untouched "
             "(it only bites on pathological repeats). Values above ~1.3 "
-            "can distort legitimately repeated sounds ('nein, nein, nein')."
+            "can distort legitimately repeated sounds ('nein, nein, nein').\n\n"
+            "8B: MOSS applies it to ALL codes in the sequence, the reference "
+            "and the prefix included, pooled across codebooks -- with a long "
+            "reference it works as a blanket push away from the cloned voice. "
+            "Keep it at 1.0 there unless you hear a loop."
         ),
     },
 )
@@ -393,8 +445,10 @@ _REP_PENALTY_INPUT = (
 # Shared "optional" inputs for the TEXT-stream sampler. MOSS v1.5 is a
 # dual-stream (text + audio) model: generate() samples the text tokens that
 # drive alignment/pacing with these, independently of the audio_* samplers
-# that shape the acoustic codebook. Defaults match MOSS's own generate()
-# defaults (1.0 / 1.0 / 50), so leaving them untouched changes nothing.
+# that shape the acoustic codebook. Defaults are the 1.7B generate()'s own
+# (1.0 / 1.0 / 50). The 8B's generate() uses text_temperature 1.5 -- the node
+# always passes the widget value, so on the 8B the default is a (tested,
+# working) choice of this pack, not MOSS's.
 # Lowering text_temperature / tightening text_top_p|k stabilizes pacing and
 # alignment without flattening the acoustic dynamics (which come from
 # audio_temperature). Optional so existing saved workflows keep validating.
@@ -404,7 +458,8 @@ _TEXT_TEMPERATURE_INPUT = (
         "default": 1.0, "min": 0.1, "max": 3.0, "step": 0.05,
         "tooltip": (
             "Temperature for the TEXT stream (alignment/pacing), NOT the "
-            "acoustics. MOSS default 1.0. Lower = steadier pacing/alignment; "
+            "acoustics. Default 1.0 = the 1.7B's own default (the 8B's "
+            "generate() would use 1.5). Lower = steadier pacing/alignment; "
             "does not flatten the voice (that's audio_temperature)."
         ),
     },
@@ -413,7 +468,11 @@ _TEXT_TOP_P_INPUT = (
     "FLOAT",
     {
         "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-        "tooltip": "Nucleus (top-p) cutoff for the TEXT stream. MOSS default 1.0 (off).",
+        "tooltip": (
+            "Nucleus (top-p) cutoff for the TEXT stream. MOSS default 1.0 (off). "
+            "Do not use 0.0: the 1.7B treats it as 'no filter', the 8B as "
+            "near-greedy -- opposite results."
+        ),
     },
 )
 _TEXT_TOP_K_INPUT = (
@@ -475,12 +534,49 @@ def _resolve_attention(device: str, requested: str) -> str:
     return req
 
 
+def _release_other_bundles() -> None:
+    """Release every cached bundle before a different one is loaded.
+
+    One MOSS model at a time: the dict used to keep every model ever loaded,
+    and nothing in ComfyUI -- "Free model and node cache" included -- reaches
+    it. Switching 1.7B -> 8B kept both, ~34 GB. Dropping our own reference is
+    not enough: the bundle IS the loader's output, and ComfyUI's default RAM-
+    pressure cache keeps that output alive until system RAM runs short -- never
+    for VRAM. So the heavy entries are taken out of the shared dict itself; a
+    node that is later handed such an emptied bundle loads it again
+    (_live_bundle).
+    """
+    if not _MODEL_CACHE:
+        return
+    logger.info(f"[MOSS-TTS] releasing {len(_MODEL_CACHE)} previously loaded model(s)")
+    for bundle in _MODEL_CACHE.values():
+        bundle.pop("model", None)
+        bundle.pop("processor", None)  # holds the audio tokenizer, on the GPU too
+    _MODEL_CACHE.clear()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _live_bundle(moss_model: dict[str, Any]) -> dict[str, Any]:
+    """The bundle to work with: one released by _release_other_bundles loads again.
+
+    Nodes call it after their own input checks -- it may load a whole model and
+    push out the other one, which an empty text must not cost.
+    """
+    if "processor" in moss_model:  # every node needs it; released bundles lack it
+        return moss_model
+    logger.info("[MOSS-TTS] this model was released for another one -- loading it again")
+    return _load_bundle(*moss_model["load_args"])
+
+
 def _load_bundle(model_id: str, device: str, attention: str = "auto",
                  codec_path: str | None = None) -> dict[str, Any]:
     attn = _resolve_attention(device, attention)
     key = (model_id, device, attn, codec_path)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
+    _release_other_bundles()
 
     dtype, dtype_name = _resolve_dtype(device)
 
@@ -492,59 +588,67 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto",
     # What the loaders are actually given. Stays the repo id unless the Windows
     # workaround below has to swap in a resolved local snapshot path.
     load_id: str = model_id
+    # The outer try also covers the Windows retry below: on the 8B that retry is
+    # where transformers' own errors surface first.
     try:
-        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True, **codec_kw)
-    except OSError as e:
-        # Windows only, and only for some model builds: MOSS's own
-        # processing_moss_tts.py does
-        #     pretrained_model_name_or_path = Path(pretrained_model_name_or_path)
-        # before handing the value to AutoConfig. On Windows that turns the repo
-        # id "Org/Model" into "Org\Model", and the Hub rejects backslashes:
-        #     Repo id must use alphanumeric chars, '-', '_' or '.'
-        # MOSS-TTS-v1.5 (8B) has that line, MOSS-TTS-Local-Transformer-v1.5
-        # does not — which is why only the 8B fails. Nothing we can fix in
-        # their file (it lives in the HF module cache and is re-downloaded on
-        # every model update), so sidestep it: resolve the repo to a local
-        # directory first. Path() on a real directory is harmless, and
-        # from_pretrained accepts a path just as well as a repo id.
-        if "Repo id must use alphanumeric chars" not in str(e) or os.path.isdir(load_id):
-            # A local folder is already what the workaround would produce;
-            # handing it to snapshot_download would only mask the real error.
-            raise
-        from huggingface_hub import snapshot_download
-        logger.info(
-            "[MOSS-TTS] windows repo-id workaround: resolving "
-            f"'{model_id}' to a local snapshot path"
-        )
-        load_id = snapshot_download(model_id)
-        processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True, **codec_kw)
+        try:
+            processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True, **codec_kw)
+        except OSError as e:
+            # Windows only, and only for some model builds: MOSS's own
+            # processing_moss_tts.py does
+            #     pretrained_model_name_or_path = Path(pretrained_model_name_or_path)
+            # before handing the value to AutoConfig. On Windows that turns the repo
+            # id "Org/Model" into "Org\Model", and the Hub rejects backslashes:
+            #     Repo id must use alphanumeric chars, '-', '_' or '.'
+            # MOSS-TTS-v1.5 (8B) has that line, MOSS-TTS-Local-Transformer-v1.5
+            # does not — which is why only the 8B fails. Nothing we can fix in
+            # their file (it lives in the HF module cache and is re-downloaded on
+            # every model update), so sidestep it: resolve the repo to a local
+            # directory first. Path() on a real directory is harmless, and
+            # from_pretrained accepts a path just as well as a repo id.
+            if "Repo id must use alphanumeric chars" not in str(e) or os.path.isdir(load_id):
+                # A local folder is already what the workaround would produce;
+                # handing it to snapshot_download would only mask the real error.
+                raise
+            from huggingface_hub import snapshot_download
+            logger.info(
+                "[MOSS-TTS] windows repo-id workaround: resolving "
+                f"'{model_id}' to a local snapshot path"
+            )
+            load_id = snapshot_download(model_id)
+            processor = AutoProcessor.from_pretrained(load_id, trust_remote_code=True, **codec_kw)
     except AttributeError as e:
-        # Newer MOSS model builds reference
-        # processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, which was introduced
-        # in transformers 5.0.0 (it was AUTO_TO_BASE_CLASS_MAPPING in 4.x). Only
-        # fire on the ACTUAL error — older cached model code loads fine on 4.x,
-        # so we must not gate up-front. Turn the cryptic crash into a clear fix.
+        # The 8B's processor code writes processing_utils.MODALITY_TO_BASE_CLASS_MAPPING,
+        # a transformers 5.0 name (4.x has AUTO_TO_BASE_CLASS_MAPPING), without a
+        # fallback. The Local-Transformer's code has one and loads on 4.x -- so
+        # fire only on the ACTUAL error and never gate up-front. Turns the
+        # cryptic crash into a clear fix.
         if "MODALITY_TO_BASE_CLASS_MAPPING" in str(e):
             import sys
             import transformers
             tv = getattr(transformers, "__version__", "?")
             py = f"{sys.version_info.major}.{sys.version_info.minor}"
-            if sys.version_info < (3, 10):
-                raise RuntimeError(
-                    f"This MOSS-TTS v1.5 model build needs transformers >= 5.0, "
-                    f"but transformers 5.x requires Python >= 3.10 and your "
-                    f"ComfyUI runs Python {py} (with transformers {tv}). Use a "
-                    f"Python 3.10+ ComfyUI, or pin an older MOSS model build that "
-                    f"runs on transformers 4.x."
-                ) from e
             raise RuntimeError(
                 f"This MOSS-TTS v1.5 model build needs transformers >= 5.0 (it "
                 f"uses processing_utils.MODALITY_TO_BASE_CLASS_MAPPING, added in "
                 f"5.0.0); you have transformers {tv} on Python {py}. Upgrade in "
                 f"your ComfyUI Python environment:\n"
-                f"    python -m pip install -U 'transformers>=5.0'"
+                f"    python -m pip install -U \"transformers>=5.5.1\""
             ) from e
         raise
+    except TypeError as e:
+        # transformers 5.4.0 and 5.5.0 turn every config into a dataclass without
+        # kw_only, and both MOSS audio tokenizer configs declare fields without a
+        # default after inherited ones -- 5.5.1 made that legal again.
+        if "non-default argument" not in str(e):
+            raise
+        import transformers
+        raise RuntimeError(
+            f"transformers {getattr(transformers, '__version__', '?')} cannot read the MOSS "
+            f"audio tokenizer's config ({e}). Only 5.4.0 and 5.5.0 are affected; upgrade in "
+            f"your ComfyUI Python environment:\n"
+            f"    python -m pip install -U \"transformers>=5.5.1\""
+        ) from e
     processor.audio_tokenizer = processor.audio_tokenizer.to(device)
 
     logger.info(
@@ -566,6 +670,7 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto",
         "device": device,
         "dtype": dtype,
         "sample_rate": sample_rate,
+        "load_args": (model_id, device, attn, codec_path),
     }
     _MODEL_CACHE[key] = bundle
     return bundle
@@ -574,16 +679,19 @@ def _load_bundle(model_id: str, device: str, attention: str = "auto",
 class MOSSLoadModel:
     """Load and cache the MOSS-TTS processor + model.
 
-    The bundle is memoised by (model_id, device) so subsequent workflow
-    runs reuse the already-loaded weights with zero overhead. dtype is
+    The bundle is memoised by (model_id, device, attention, codec_path) so
+    subsequent workflow runs reuse the already-loaded weights with zero
+    overhead; loading a different one releases it (one model at a time). dtype is
     resolved internally (bfloat16 on CUDA, float32 on CPU).
     """
 
     DESCRIPTION = (
         "Loads a MOSS-TTS v1.5 processor + model. Two variants selectable: "
-        "MOSS-TTS-Local-Transformer-v1.5 (~1.7B, MossTTSLocal architecture, "
+        "MOSS-TTS-Local-Transformer-v1.5 (~4.5B parameters despite the "
+        "'(1.7B)' in its dropdown label, MossTTSLocal architecture, 48 kHz stereo, "
         "our default, ~12 GB VRAM in bf16) or MOSS-TTS-v1.5 (~8B, "
-        "MossTTSDelay architecture, ~22 GB VRAM, potentially better quality). "
+        "MossTTSDelay architecture, 24 kHz mono, ~22 GB VRAM, potentially "
+        "better quality). "
         "First execution downloads weights (~9 GB / ~17 GB respectively, plus "
         "the ~7-8.5 GB audio tokenizer) into "
         "the Hugging Face cache and moves them to the selected device. Already "
@@ -591,7 +699,8 @@ class MOSSLoadModel:
         "point extra_model_paths.yaml's 'moss_tts' entry at your model "
         "library) and pick it from the dropdown, or give its path to "
         "model_path -- nothing is downloaded then. "
-        "Subsequent runs reuse the cached bundle -> no re-load penalty. dtype "
+        "Subsequent runs reuse the cached bundle -> no re-load penalty. One "
+        "model is kept at a time: loading another releases the previous one. dtype "
         "is picked automatically: bfloat16 on CUDA, float32 on CPU."
     )
 
@@ -605,8 +714,10 @@ class MOSSLoadModel:
                         "default": DEFAULT_MODEL_LABEL,
                         "tooltip": (
                             "Which MOSS model to load. Both are v1.5, same API, "
-                            "31 languages, 48 kHz stereo, same 'tokens' / "
-                            "duration semantics. Local-Transformer (~1.7B) is "
+                            "31 languages, same 'tokens' / duration semantics. "
+                            "Local-Transformer: 48 kHz stereo, ~4.5B parameters "
+                            "-- the '(1.7B)' in its label is kept only because "
+                            "saved workflows store this exact text. It is "
                             "smaller/faster (~12 GB VRAM), MOSS-TTS-v1.5 (~8B) "
                             "is the deeper MossTTSDelay model (~22 GB VRAM), "
                             "potentially better prosody/expressiveness. Fits "
@@ -675,9 +786,10 @@ class MOSSLoadModel:
                         "tooltip": (
                             "Folder of the MOSS audio tokenizer, for a fully "
                             "offline load. Leave empty and the tokenizer "
-                            "matching the model's sample rate is taken from "
-                            "the model folder, or -- for a Hub model -- left "
-                            "to MOSS itself. Needed because a local model "
+                            "matching the model's sample rate is looked for "
+                            "next to the model and in every 'moss_tts' model "
+                            "folder, or -- for a Hub model -- left to MOSS "
+                            "itself. Needed because a local model "
                             "alone still pulls its tokenizer (7-8.5 GB) off "
                             "the Hub: MOSS names it by repo id."
                         ),
@@ -744,15 +856,36 @@ def _require_text(text: str, field: str = "text") -> str:
     return stripped
 
 
-def _apply_overshoot_cap(max_new_tokens: int, target_tokens: int | None, overshoot: int) -> int:
-    """Cap effective max_new_tokens when target_tokens is set, to prevent MOSS runaway.
+def _generation_row_overhead(processor: Any, continuation: bool = False) -> int:
+    """Generate() steps that carry no new audio frame, per build.
 
-    If target_tokens is unset (None), returns max_new_tokens unchanged (auto-EOS mode).
-    Otherwise returns min(max_new_tokens, target_tokens + overshoot).
+    The 1.7B spends one step per frame. The 8B spends one step per ROW: the n_vq-1
+    run-out rows of its delay pattern plus the audio_start, audio_end and im_end
+    rows come on top of the frames -- 34 at n_vq=32. A continuation's prompt
+    already holds its audio_start row, so there it is one less. Counted in
+    frames, a cap of target+50 left the 8B about 16 frames of slack, and
+    target+overshoot < 32 left MOSS's de-delay no complete frame at all
+    ("negative dimension").
+    """
+    if not _uses_delay_pattern(processor):
+        return 0
+    return _processor_n_vq(processor) + (1 if continuation else 2)
+
+
+def _apply_overshoot_cap(max_new_tokens: int, target_tokens: int | None, overshoot: int,
+                         row_overhead: int = 0) -> int:
+    """Effective generate() max_new_tokens, with every user number meant in FRAMES.
+
+    Without target_tokens (None) the frame budget is max_new_tokens (auto-EOS
+    mode); with it, min(max_new_tokens, target_tokens + overshoot) caps a runaway.
+    ``row_overhead`` (see _generation_row_overhead) then turns frames into the
+    steps the build actually spends.
     """
     if target_tokens is None:
-        return int(max_new_tokens)
-    return min(int(max_new_tokens), int(target_tokens) + max(0, int(overshoot)))
+        frames = int(max_new_tokens)
+    else:
+        frames = min(int(max_new_tokens), int(target_tokens) + max(0, int(overshoot)))
+    return frames + max(0, int(row_overhead))
 
 
 def _to_stereo_at(waveform: torch.Tensor, source_sr: int, target_sr: int) -> torch.Tensor:
@@ -783,6 +916,9 @@ def _concat_full_audio(
 ) -> tuple[dict[str, Any], int]:
     """Concatenate previous_audio + new segment as a fresh ComfyUI AUDIO dict at target_sr."""
     prev_wave = _to_stereo_at(previous_audio["waveform"], int(previous_audio["sample_rate"]), target_sr)
+    # The prefix was taken from batch item 0 (_comfy_audio_to_codes); a batch of
+    # several would not even concatenate with the new [1, 2, T] segment.
+    prev_wave = prev_wave[:1]
     new_wave = new_audio_dict["waveform"].to(torch.float32)  # already at target_sr from _to_comfy_audio
     if new_wave.shape[1] == 1:
         new_wave = new_wave.repeat(1, 2, 1)
@@ -790,9 +926,29 @@ def _concat_full_audio(
     return ({"waveform": full_wave, "sample_rate": int(target_sr)}, int(prefix_frames + new_tokens))
 
 
+def _prefix_frame_start_lengths(processor: Any, outputs: Any) -> list:
+    """``generate()``'s start_length as a count of PREFIX FRAMES, on both builds.
+
+    The 1.7B already reports it that way (``input_ids_length - start_index - 1``).
+    The 8B reports ``seq_len - (last im_start + 3)``: with a prefix that range
+    starts AT the audio_start marker row, so the marker is counted as one more
+    prompt row. Every consumer, MOSS's own ``_parse_audio_codes`` included, cuts
+    that count off a segment from which the all-pad marker row was already
+    removed -- one frame too many. The audio lost 80 ms at every continuation
+    seam, and the 'tokens' output left an 80 ms hole in a Concat chain.
+
+    Without a prefix (Speak, Voice Clone) the marker is generated, not prompted,
+    and start_length is 0 on both builds -- left alone.
+    """
+    items = list(outputs or [])
+    if not _uses_delay_pattern(processor):
+        return items
+    return [(int(start) - 1 if int(start) > 0 else int(start), ids) for start, ids in items]
+
+
 def _extract_audio(processor: Any, outputs: Any) -> torch.Tensor:
     """Decode + pull the first audio tensor, with a clear error if MOSS returned nothing."""
-    decoded = processor.decode(outputs)
+    decoded = processor.decode(_prefix_frame_start_lengths(processor, outputs))
     if not decoded or decoded[0] is None:
         raise RuntimeError(
             "MOSS returned no decodable audio (empty content in generation). "
@@ -872,7 +1028,19 @@ def _as_token_tensor(value: Any, field: str, n_vq: int | None = None) -> torch.T
             f"n_vq={int(n_vq)}. Tokens are model-specific -- re-encode the reference with "
             "MOSS-TTS Encode Tokens using the model you are generating with."
         )
+    if value.is_floating_point() and value.numel() and not torch.equal(value, value.round()):
+        raise ValueError(
+            f"MOSS-TTS: '{field}' holds fractional values -- MOSS codes are integers. "
+            "This is not a MOSS_TOKENS stream."
+        )
     tokens = value.detach().to(dtype=torch.long).cpu().contiguous()
+    if tokens.numel() and int(tokens.min()) < 0:
+        # A negative index reaches the codec's embedding unchecked; on CUDA that is
+        # a device-side assert that leaves the context unusable until a restart.
+        raise ValueError(
+            f"MOSS-TTS: '{field}' holds negative values -- MOSS codes run from 0 to "
+            f"{MOSS_AUDIO_PAD_CODE - 1}. This is not a MOSS_TOKENS stream."
+        )
     # Real codes never carry the pad value: the codebooks go up to 1023 and
     # 1024 marks a NON-audio row. Seeing it here means the file came from a
     # build that passed the 8B's output through in the delay pattern, where the
@@ -912,9 +1080,10 @@ def _comfy_audio_to_codes(
     input path. encode_audios_from_wav only uses torchaudio.functional.resample
     (a pure tensor op), so it works on any torchaudio build.
 
-    The processor wants a [C, T] float32 waveform plus its sample rate: it
-    duplicates mono to stereo, keeps the first two channels of anything wider,
-    resamples to the model's native rate and loudness-normalises -- exactly
+    The processor wants a [C, T] float32 waveform plus its sample rate. The
+    1.7B duplicates mono to stereo and keeps the first two channels of anything
+    wider; the 8B mixes down to mono. Both then resample to the model's native
+    rate and loudness-normalise -- exactly
     what it used to do with the samples it read back from the WAV. The only
     difference to that round trip is that the codes are no longer computed from
     16-bit PCM: a dropped quantisation step, not a change of meaning, so the
@@ -960,7 +1129,8 @@ def _extract_generated_codes(processor: Any, outputs: Any) -> torch.Tensor:
         ever does emit them as a leading segment, the start_length rule below
         drops it, exactly like _parse_audio_codes does).
       * continuation -> the length of the prompt audio, which shares ONE
-        segment with the new audio. Unlike the audio path (which can only trim
+        segment with the new audio (on the 8B after _prefix_frame_start_lengths
+        took the marker row back out of it). Unlike the audio path (which can only trim
         by sample proportion after vocoding) we slice ``[start_length:]``, an
         exact frame-accurate cut.
 
@@ -970,7 +1140,7 @@ def _extract_generated_codes(processor: Any, outputs: Any) -> torch.Tensor:
     the same representation ``MOSS-TTS Encode Tokens`` produces, which is what
     makes the two safe to concatenate.
     """
-    items = list(outputs or [])
+    items = _prefix_frame_start_lengths(processor, outputs)
     if not items:
         raise RuntimeError(
             "MOSS returned no generation output at all (empty result from generate())."
@@ -1104,6 +1274,20 @@ def _comfy_dir(kind: str) -> Path:
     return Path(folder_paths.get_input_directory())
 
 
+def _inside_comfy_dirs(raw: str) -> bool:
+    """Whether raw lies inside ComfyUI's input or output dir -- decided on the
+    string alone, so a network path is never touched to find out."""
+    path = os.path.normcase(os.path.normpath(raw))
+    for kind in ("input", "output"):
+        try:
+            base = os.path.normcase(os.path.normpath(os.path.abspath(_comfy_dir(kind))))
+            if os.path.commonpath([path, base]) == base:
+                return True
+        except Exception:  # no folder_paths, another drive, a relative raw
+            continue
+    return False
+
+
 def _list_token_files() -> list[str]:
     """Token files in ComfyUI's input and output dir, exactly as the loader takes them.
 
@@ -1158,6 +1342,11 @@ def _resolve_tokens_path(path: str) -> Path:
             "MOSS-TTS Save Tokens once (it writes into ComfyUI's output directory) and "
             "reload the page, or put a path into 'path_override'."
         )
+    # Here already when the workflow is queued: IS_CHANGED stats the file. A path
+    # inside ComfyUI's own input/output dir is exempt -- that may be a share
+    # itself, and Save Tokens hands out exactly such a path.
+    if not _inside_comfy_dirs(raw):
+        _refuse_network_path(raw, "token files")
     candidate = Path(raw)
     if candidate.is_absolute():
         if candidate.is_file():
@@ -1177,6 +1366,8 @@ def _resolve_tokens_path(path: str) -> Path:
 
     tried: list[Path] = []
     for kind, relative in attempts:
+        # base / "//host/share" IS //host/share, and resolve() would touch it
+        _refuse_network_path(relative, "token files")
         base = _comfy_dir(kind).resolve()
         resolved = (base / relative).resolve()
         if base not in resolved.parents:
@@ -1306,9 +1497,10 @@ class MOSSSpeak:
                         "max": 3.0,
                         "step": 0.05,
                         "tooltip": (
-                            "Sampling temperature. MOSS default is 1.7. "
-                            "Lower -> more deterministic and safer, higher -> "
-                            "more expressive but noisier."
+                            "Sampling temperature. Default 1.7 = the 8B's own "
+                            "generate() default (the 1.7B's would fall back to "
+                            "1.0). Lower -> more deterministic and safer, "
+                            "higher -> more expressive but noisier."
                         ),
                     },
                 ),
@@ -1403,7 +1595,8 @@ class MOSSSpeak:
     RETURN_TYPES = ("AUDIO", "INT", "MOSS_TOKENS")
     RETURN_NAMES = ("audio", "tokens_generated", "tokens")
     OUTPUT_TOOLTIPS = (
-        "Generated audio at 48 kHz stereo, ready for SaveAudio / PreviewAudio.",
+        "Generated audio at the model's native rate -- 48 kHz stereo on the "
+        "1.7B, 24 kHz mono on the 8B -- ready for SaveAudio / PreviewAudio.",
         "Number of audio frames MOSS actually generated (frames, not samples). "
         "At 12.5 fps this equals duration_seconds * 12.5.",
         _TOKENS_OUTPUT_TOOLTIP,
@@ -1429,12 +1622,13 @@ class MOSSSpeak:
         text_top_p: float = 1.0,
         text_top_k: int = 50,
     ) -> tuple[dict[str, Any], int, torch.Tensor]:
+        clean_text = _require_text(text, "text")
+        moss_model = _live_bundle(moss_model)
         processor = moss_model["processor"]
         model = moss_model["model"]
         device = moss_model["device"]
         _seed(device, seed)
 
-        clean_text = _require_text(text, "text")
         build_kwargs: dict[str, Any] = {
             "text": clean_text,
             "language": language,
@@ -1445,7 +1639,8 @@ class MOSSSpeak:
         if tok_hint is not None:
             build_kwargs["tokens"] = tok_hint
 
-        effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames)
+        effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames,
+                                             _generation_row_overhead(processor))
         logger.info(
             f"[MOSS-TTS] speak text_chars={len(build_kwargs['text'])} "
             f"lang={language} instruction={'set' if instruction.strip() else 'none'} "
@@ -1488,9 +1683,10 @@ class MOSSVoiceClone:
     """Generate speech in the cloned voice from a reference AUDIO."""
 
     DESCRIPTION = (
-        "Zero-shot voice cloning. Feed a reference audio clip (any length, "
+        "Zero-shot voice cloning. Feed a reference audio clip (10-20 s works best, "
         "any language supported by MOSS) plus target text and MOSS returns "
-        "the target text spoken in that voice at 48 kHz stereo. Give the "
+        "the target text spoken in that voice (48 kHz stereo on the 1.7B, "
+        "24 kHz mono on the 8B). Give the "
         "reference at least ~10 s: below that (a ~5 s clip) MOSS has too "
         "little acoustic evidence and returns gibberish rather than a rough "
         "clone. MOSS does NOT accept a reference transcript here -- only the "
@@ -1555,9 +1751,10 @@ class MOSSVoiceClone:
                         "max": 3.0,
                         "step": 0.05,
                         "tooltip": (
-                            "Sampling temperature. MOSS default is 1.7. "
-                            "Lower -> more deterministic and safer, higher -> "
-                            "more expressive but noisier."
+                            "Sampling temperature. Default 1.7 = the 8B's own "
+                            "generate() default (the 1.7B's would fall back to "
+                            "1.0). Lower -> more deterministic and safer, "
+                            "higher -> more expressive but noisier."
                         ),
                     },
                 ),
@@ -1671,7 +1868,8 @@ class MOSSVoiceClone:
     RETURN_TYPES = ("AUDIO", "INT", "MOSS_TOKENS")
     RETURN_NAMES = ("audio", "tokens_generated", "tokens")
     OUTPUT_TOOLTIPS = (
-        "Generated audio at 48 kHz stereo, ready for SaveAudio / PreviewAudio.",
+        "Generated audio at the model's native rate -- 48 kHz stereo on the "
+        "1.7B, 24 kHz mono on the 8B -- ready for SaveAudio / PreviewAudio.",
         "Number of audio frames MOSS actually generated (frames, not samples). "
         "At 12.5 fps this equals duration_seconds * 12.5.",
         _TOKENS_OUTPUT_TOOLTIP,
@@ -1699,11 +1897,6 @@ class MOSSVoiceClone:
         text_top_p: float = 1.0,
         text_top_k: int = 50,
     ) -> tuple[dict[str, Any], int, torch.Tensor]:
-        processor = moss_model["processor"]
-        model = moss_model["model"]
-        device = moss_model["device"]
-        _seed(device, seed)
-
         if reference_tokens is None and reference_audio is None:
             raise ValueError(
                 "MOSS-TTS Voice Clone: no voice reference. Wire either "
@@ -1712,6 +1905,12 @@ class MOSSVoiceClone:
             )
 
         clean_text = _require_text(text, "text")
+        moss_model = _live_bundle(moss_model)
+        processor = moss_model["processor"]
+        model = moss_model["model"]
+        device = moss_model["device"]
+        _seed(device, seed)
+
         # Both branches end up as a [T, n_vq] code tensor: the processor's
         # _resolve_audio_items takes such a tensor verbatim. The token path just
         # skips the codec pass -- neither path touches the disk.
@@ -1744,7 +1943,8 @@ class MOSSVoiceClone:
         if tok_hint is not None:
             build_kwargs["tokens"] = tok_hint
 
-        effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames)
+        effective_max = _apply_overshoot_cap(max_new_tokens, tok_hint, target_overshoot_frames,
+                                             _generation_row_overhead(processor))
         logger.info(
             f"[MOSS-TTS] clone text_chars={len(build_kwargs['text'])} "
             f"lang={language} instruction={'set' if instruction.strip() else 'none'} "
@@ -1847,9 +2047,10 @@ class MOSSVoiceContinue:
                         "tooltip": (
                             "New text to speak after the previous audio ends. "
                             "Internally concatenated as: previous_text + ' ' + "
-                            "text -> full script. Empty is legal but MOSS "
-                            "will then close out almost immediately -- supply "
-                            "real follow-up text for meaningful output."
+                            "text -> full script. Must not be empty: with "
+                            "nothing to say MOSS never emits its end token and "
+                            "generates until max_new_tokens, so the node "
+                            "refuses it up front."
                         ),
                     },
                 ),
@@ -1863,7 +2064,7 @@ class MOSSVoiceContinue:
                 "audio_temperature": (
                     "FLOAT",
                     {"default": 1.7, "min": 0.1, "max": 3.0, "step": 0.05,
-                     "tooltip": "Sampling temperature (MOSS default 1.7)."},
+                     "tooltip": "Sampling temperature (default 1.7 = the 8B's generate() default)."},
                 ),
                 "audio_top_p": (
                     "FLOAT",
@@ -1942,7 +2143,7 @@ class MOSSVoiceContinue:
                             "Extra frames to trim from the START of the new "
                             "audio (1 frame = 80 ms at 12.5 fps). MOSS's "
                             "decoder trims the prefix by SAMPLE proportion, "
-                            "and its conv-based 48 kHz codec has a receptive "
+                            "and its conv-based codec has a receptive "
                             "field that spans frame boundaries -- so the "
                             "last prefix frame can bleed audibly into the "
                             "start of the returned continuation. Default 1 "
@@ -1970,6 +2171,36 @@ class MOSSVoiceContinue:
                         ),
                     },
                 ),
+            },
+            "optional": {
+                "previous_audio": (
+                    "AUDIO",
+                    {
+                        "tooltip": (
+                            "Prior MOSS output to continue from. Typically the "
+                            "AUDIO output of a preceding MOSS-TTS Voice Clone / "
+                            "Voice Continue node. Must be paired with the exact "
+                            "'previous_text' that produced it -- a clip and a "
+                            "transcript that do not describe the same speech yield "
+                            "gibberish, so cut both to the same point or neither. "
+                            "Required unless "
+                            "'prev_tokens' is wired -- it is only declared "
+                            "optional because ComfyUI has no way to express "
+                            "'required unless that other input is connected'. "
+                            "Still worth wiring alongside prev_tokens if you "
+                            "want the 'full_audio' output: without it there is "
+                            "no prior waveform to prepend."
+                        ),
+                    },
+                ),
+                "prev_tokens": _PREV_TOKENS_INPUT,
+                "audio_repetition_penalty": _REP_PENALTY_INPUT,
+                "text_temperature": _TEXT_TEMPERATURE_INPUT,
+                "text_top_p": _TEXT_TOP_P_INPUT,
+                "text_top_k": _TEXT_TOP_K_INPUT,
+                # APPENDED, never inserted: ComfyUI restores widget values by
+                # POSITION. In required (0.6.1) it shifted every workflow saved
+                # on main by one -- text_top_p got 50 and the node was rejected.
                 "prefix_tail_trim_frames": (
                     "INT",
                     {
@@ -2006,33 +2237,6 @@ class MOSSVoiceContinue:
                     },
                 ),
             },
-            "optional": {
-                "previous_audio": (
-                    "AUDIO",
-                    {
-                        "tooltip": (
-                            "Prior MOSS output to continue from. Typically the "
-                            "AUDIO output of a preceding MOSS-TTS Voice Clone / "
-                            "Voice Continue node. Must be paired with the exact "
-                            "'previous_text' that produced it -- a clip and a "
-                            "transcript that do not describe the same speech yield "
-                            "gibberish, so cut both to the same point or neither. "
-                            "Required unless "
-                            "'prev_tokens' is wired -- it is only declared "
-                            "optional because ComfyUI has no way to express "
-                            "'required unless that other input is connected'. "
-                            "Still worth wiring alongside prev_tokens if you "
-                            "want the 'full_audio' output: without it there is "
-                            "no prior waveform to prepend."
-                        ),
-                    },
-                ),
-                "prev_tokens": _PREV_TOKENS_INPUT,
-                "audio_repetition_penalty": _REP_PENALTY_INPUT,
-                "text_temperature": _TEXT_TEMPERATURE_INPUT,
-                "text_top_p": _TEXT_TOP_P_INPUT,
-                "text_top_k": _TEXT_TOP_K_INPUT,
-            },
         }
 
     RETURN_TYPES = ("AUDIO", "INT", "AUDIO", "INT", "MOSS_TOKENS")
@@ -2043,7 +2247,8 @@ class MOSSVoiceContinue:
         "Frames of the NEW segment only (frames, not samples). At 12.5 fps "
         "this equals duration_seconds * 12.5.",
         "Cumulative audio: previous_audio + new segment concatenated at "
-        "48 kHz stereo. Wire this into the NEXT Continue's previous_audio "
+        "the model's rate, always as two channels (dual mono on the 8B). Wire "
+        "this into the NEXT Continue's previous_audio "
         "when the same speaker keeps talking across segments. Falls back to "
         "the new segment alone when only prev_tokens (no previous_audio) is "
         "wired -- there is no prior waveform to prepend then.",
@@ -2078,11 +2283,6 @@ class MOSSVoiceContinue:
         text_top_p: float = 1.0,
         text_top_k: int = 50,
     ) -> tuple[dict[str, Any], int, dict[str, Any], int, torch.Tensor]:
-        processor = moss_model["processor"]
-        model = moss_model["model"]
-        device = moss_model["device"]
-        _seed(device, seed)
-
         if prev_tokens is None and previous_audio is None:
             raise ValueError(
                 "MOSS-TTS Voice Continue: nothing to continue from. Wire either "
@@ -2093,6 +2293,11 @@ class MOSSVoiceContinue:
         new = _require_text(text, "text")
         prev = (previous_text or "").strip()
         full_text = (prev + " " + new).strip() if prev else new
+        moss_model = _live_bundle(moss_model)
+        processor = moss_model["processor"]
+        model = moss_model["model"]
+        device = moss_model["device"]
+        _seed(device, seed)
 
         # Both branches end up as a [T, n_vq] code tensor for the assistant message
         # (_resolve_audio_items takes such a tensor verbatim); the audio branch just
@@ -2181,6 +2386,7 @@ class MOSSVoiceContinue:
             max_new_tokens,
             None if tok_hint is None else tok_hint + tail_trim,
             target_overshoot_frames,
+            _generation_row_overhead(processor, continuation=True),
         )
 
         logger.info(
@@ -2302,6 +2508,7 @@ class MOSSEncodeTokens:
     CATEGORY = "MOSS TTS 1.5"
 
     def encode(self, moss_model: dict[str, Any], audio: dict[str, Any]) -> tuple[torch.Tensor, int]:
+        moss_model = _live_bundle(moss_model)
         processor = moss_model["processor"]
         tokens, seconds = _comfy_audio_to_codes(processor, audio, "audio")
         frames = int(tokens.shape[0])
@@ -2370,7 +2577,8 @@ class MOSSDecodeTokens:
                             "'tokens' output lines up with its own 'audio'. False "
                             "averages the codec channels into one mono channel: "
                             "smaller, but no longer bit-identical to the generate "
-                            "nodes' audio."
+                            "nodes' audio. 1.7B only: the 8B codec is mono and "
+                            "ignores this switch."
                         ),
                     },
                 ),
@@ -2380,8 +2588,9 @@ class MOSSDecodeTokens:
     RETURN_TYPES = ("AUDIO", "INT")
     RETURN_NAMES = ("audio", "frames")
     OUTPUT_TOOLTIPS = (
-        "Decoded audio at the model's native sample rate (stereo unless "
-        "return_stereo is off), ready for PreviewAudio / SaveAudio.",
+        "Decoded audio at the model's native sample rate -- stereo on the 1.7B "
+        "unless return_stereo is off, always mono on the 8B -- ready for "
+        "PreviewAudio / SaveAudio.",
         "Number of code frames decoded. Divide by 12.5 for seconds.",
     )
     FUNCTION = "decode"
@@ -2393,6 +2602,7 @@ class MOSSDecodeTokens:
         tokens: torch.Tensor,
         return_stereo: bool = True,
     ) -> tuple[dict[str, Any], int]:
+        moss_model = _live_bundle(moss_model)
         processor = moss_model["processor"]
         n_vq = _processor_n_vq(processor)
         tensor = _as_token_tensor(tokens, "tokens", n_vq)
@@ -2406,11 +2616,16 @@ class MOSSDecodeTokens:
         # processor.decode_audio_codes takes exactly the [T, n_vq] layout this pack
         # passes around (it transposes to [n_vq, T] itself) and returns ONE waveform
         # per code segment: [C, T] float32 on CPU, or [T] mono with return_stereo=False.
+        # Only the 1.7B processor has return_stereo; the 8B one takes the codes alone
+        # (and returns [T] mono) -- passing the keyword there is a TypeError.
         # It is the same call _parse_audio_codes makes behind processor.decode(), minus
         # the prompt-row segmentation and the start_length trim -- so decoding a
         # 'tokens' output reproduces the AUDIO output it was emitted with.
+        decode_kw = {}
+        if "return_stereo" in inspect.signature(processor.decode_audio_codes).parameters:
+            decode_kw["return_stereo"] = bool(return_stereo)
         with torch.inference_mode():
-            decoded = processor.decode_audio_codes([tensor], return_stereo=bool(return_stereo))
+            decoded = processor.decode_audio_codes([tensor], **decode_kw)
         if not decoded or decoded[0] is None:
             raise RuntimeError(
                 "MOSS's vocoder returned no audio for these codes. Check that the "
@@ -2427,7 +2642,7 @@ class MOSSDecodeTokens:
         audio_dict, measured_frames, seconds = _to_comfy_audio(waveform, sample_rate)
         logger.info(
             f"[MOSS-TTS] decode_tokens frames={frames} seconds={seconds:.2f} "
-            f"n_vq={n_vq} return_stereo={bool(return_stereo)} "
+            f"n_vq={n_vq} return_stereo={decode_kw.get('return_stereo', 'n/a')} "
             f"channels={int(audio_dict['waveform'].shape[1])} "
             f"measured_frames={measured_frames} sample_rate={sample_rate}"
         )
@@ -2670,10 +2885,11 @@ class MOSSLoadTokens:
     def load(self, path: str, path_override: str = "") -> tuple[torch.Tensor, int]:
         selected = _selected_tokens_path(path, path_override)
         resolved = _resolve_tokens_path(selected)
-        try:
-            payload = torch.load(str(resolved), map_location="cpu", weights_only=True)
-        except TypeError:  # pragma: no cover - torch < 1.13 has no weights_only
-            payload = torch.load(str(resolved), map_location="cpu")
+        # weights_only=True and nothing else: a fallback on TypeError would also
+        # catch a crafted file the safe unpickler rejects, and re-load it with the
+        # FULL unpickler -- code execution on any torch < 2.6. Every torch ComfyUI
+        # runs on has weights_only.
+        payload = torch.load(str(resolved), map_location="cpu", weights_only=True)
         tokens = _tokens_from_payload(payload, str(resolved))
         frames = int(tokens.shape[0])
         logger.info(
@@ -2685,14 +2901,27 @@ class MOSSLoadTokens:
         return (tokens, frames)
 
 
-def _is_cjk(text: str) -> bool:
-    for ch in text[:200]:
-        code = ord(ch)
-        if 0x4E00 <= code <= 0x9FFF: return True   # CJK unified ideographs
-        if 0x3040 <= code <= 0x309F: return True   # hiragana
-        if 0x30A0 <= code <= 0x30FF: return True   # katakana
-        if 0xAC00 <= code <= 0xD7AF: return True   # hangul
-    return False
+def _is_cjk_char(ch: str) -> bool:
+    code = ord(ch)
+    return (0x4E00 <= code <= 0x9FFF       # CJK unified ideographs
+            or 0x3040 <= code <= 0x309F    # hiragana
+            or 0x30A0 <= code <= 0x30FF    # katakana
+            or 0xAC00 <= code <= 0xD7AF)   # hangul
+
+
+def _speech_units(text: str) -> int:
+    """Units the rate applies to: every CJK character, plus each word of the rest.
+
+    Per text, "any CJK" counted every Latin letter of mixed text as a character
+    (~3x too long) and "mostly CJK" counted an unspaced Chinese sentence as one
+    word (~0.4 s). Per character works for both. Pure space-separated text counts
+    exactly as before. In CJK text every run of other characters -- punctuation,
+    digits, full-width Latin -- is one unit now, so a number there is counted
+    short, as it always was in English.
+    """
+    cjk = sum(map(_is_cjk_char, text))
+    rest = "".join(" " if _is_cjk_char(ch) else ch for ch in text)
+    return cjk + len(rest.split())
 
 
 class MOSSEstimateTokens:
@@ -2722,10 +2951,9 @@ class MOSSEstimateTokens:
                         "default": "",
                         "multiline": True,
                         "tooltip": (
-                            "Text to estimate. Word count via whitespace split "
-                            "for space-separated languages; for CJK (Chinese, "
-                            "Japanese, Korean) falls back to non-whitespace "
-                            "character count."
+                            "Text to estimate. Counts words (whitespace split); "
+                            "every Chinese, Japanese or Korean character counts "
+                            "as a unit of its own, so mixed text works too."
                         ),
                     },
                 ),
@@ -2761,10 +2989,7 @@ class MOSSEstimateTokens:
         text = text.strip()
         if not text:
             return (0,)
-        if _is_cjk(text):
-            unit_count = sum(1 for ch in text if not ch.isspace())
-        else:
-            unit_count = len(text.split())
+        unit_count = _speech_units(text)
         pace_per_second = max(1e-3, float(words_per_minute) / 60.0)
         seconds = unit_count / pace_per_second
         tokens = int(math.ceil(seconds * MOSS_FRAMES_PER_SECOND))

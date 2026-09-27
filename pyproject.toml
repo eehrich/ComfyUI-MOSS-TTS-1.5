@@ -1,24 +1,19 @@
 [project]
 name = "ComfyUI-MOSS-TTS-1.5"
-description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS v1.5 — both the 1.7B Local-Transformer (48 kHz) and the 8B full model (24 kHz). Reference-free TTS, zero-shot voice cloning, audio continuation, hard duration control, 31 languages, stereo output."
-version = "0.6.3"
+description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS v1.5 — both the Local-Transformer (48 kHz stereo) and the 8B full model (24 kHz mono). Reference-free TTS, zero-shot voice cloning, audio continuation, hard duration control, an encode-once token pipeline, 31 languages."
+version = "0.6.4"
 authors = [
   { name = "Enrico Ehrich" },
   { name = "Claude Opus 4.8 (Anthropic)", email = "noreply@anthropic.com" },
 ]
 license = { file = "LICENSE" }
 dependencies = [
-  # No pip deps on purpose. The current MOSS-TTS v1.5 model build adapts to the
-  # installed transformers itself: its remote code guards with
-  #   hasattr(processing_utils, "MODALITY_TO_BASE_CLASS_MAPPING")
-  # and falls back to the 4.x AUTO_TO_BASE_CLASS_MAPPING, so it loads on
-  # transformers 4.x AND 5.x. ComfyUI already ships transformers>=4.50.3, and
-  # torch / torchaudio come from ComfyUI too.
-  # We deliberately do NOT force transformers>=5.0: it would break installs on
-  # Python < 3.10 (every 5.x needs >= 3.10) and needlessly upgrade a working 4.x.
-  # As a safety net the loader still catches a load-time AttributeError and
-  # prints a clear "upgrade transformers" message, in case a future model build
-  # ever drops the guard.
+  # No pip deps on purpose: torch, torchaudio and transformers (>= 4.50.3) come
+  # with ComfyUI. The Local-Transformer's model and tokenizer code fall back to
+  # the transformers 4.x names, so it loads on 4.x and 5.x. The 8B's code uses
+  # 5.x-only names without a fallback -- on 4.x the loader stops with a clear
+  # "upgrade transformers" message. Forcing transformers>=5.0 here would break
+  # every 4.x install that only ever runs the Local-Transformer.
 ]
 
 [project.urls]
