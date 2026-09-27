@@ -1,57 +1,59 @@
 # ComfyUI-MOSS-TTS-1.5
 
-ComfyUI custom nodes for **MOSS-TTS v1.5** by [OpenMOSS](https://github.com/OpenMOSS) — supporting **both** model variants:
-[**MOSS-TTS-Local-Transformer-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) (~4.5B parameters, 48 kHz stereo, the fast default — listed as “(1.7B)” in the dropdown, a label saved workflows depend on) and the full [**MOSS-TTS-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (~8B, 24 kHz mono). Pick either in the Load Model dropdown — same nodes, same API.
-Ten lean nodes for reference-free TTS, zero-shot voice cloning, deterministic duration steering, audio continuation, and an encode-once token pipeline — no fine-tuning, no separate reference-transcript dance.
+ComfyUI custom nodes for **MOSS-TTS v1.5** by [OpenMOSS](https://github.com/OpenMOSS): text-to-speech, voice cloning and seamless continuation in 31 languages, with both model variants:
 
-- **Two models, one nodepack** — Local-Transformer (48 kHz stereo) or 8B full MOSS-TTS (24 kHz mono), selected per workflow
-- **31 languages** (with explicit language tag support)
-- **Output at the model's native rate** — 48 kHz stereo on the Local-Transformer, 24 kHz mono on the 8B
-- **Reference-free synthesis** via a plain-text instruction ("male, warm, elderly narrator") — no reference audio needed
-- **Zero-shot voice cloning** from a single reference clip
-- **Hard duration control** via `target_tokens` (empirically verified — MOSS obeys it precisely)
-- **Continuation mode** — extend a previously generated clip in the same voice
-- **Audio repetition penalty** (v0.5.1) — optional `audio_repetition_penalty` input on all generate nodes, forwarded to MOSS's native logits penalty. Mild values (1.05–1.15) suppress droning / tempo-freeze / looping-syllable outliers without flattening prosody.
-- **Text-stream samplers** (v0.5.4) — optional `text_temperature` / `text_top_p` / `text_top_k` on all generate nodes to steer MOSS's dual-stream **text** channel (pacing / alignment) independently of the acoustic `audio_*` samplers.
-- **Robust attention** (v0.5.5) — no `flash_attn` crash on a fresh install; the loader's `attention: auto` falls back to PyTorch's built-in `sdpa` when flash-attn is absent.
-- **Empty-text guard** (v0.5.6) — an empty / whitespace-only prompt fails fast with a clear message instead of making MOSS generate audio until `max_new_tokens` (a multi-minute hang, since it never emits EOS with nothing to say).
-- **Encode-once token pipeline** (v0.6.0) — a `MOSS_TOKENS` type (raw MOSS audio codes) with five nodes (Encode / Decode / Concat / Save / Load Tokens), optional token inputs on Voice Clone / Voice Continue, and a `tokens` output on every generate node. Encode a voice reference a single time and hand MOSS the codes on every later run — the codec encode drops out of the request entirely. `Decode Tokens` closes the loop: listen to what a token file or a concat result actually holds, without generating. See [Token pipeline (encode once)](#token-pipeline-encode-once).
-- **8B delay seam** (v0.6.1) — `prefix_tail_trim_frames` on Voice Continue ends the prefix before the 8B's delay-pattern seam, which removes the glitches of chained 8B continuation. See [The 8B delay seam](#the-8b-delay-seam).
-- **Models you already have** (v0.6.2) — put a model under `ComfyUI/models/moss_tts` (or point `extra_model_paths.yaml` at your own library) and it appears in the loader dropdown, loaded straight off disk; `model_path` takes a folder anywhere else. The audio tokenizer counts as well: one lying beside the model is paired with it by sample rate, so a complete offline install downloads nothing at all. See [Using a model you already downloaded](#using-a-model-you-already-downloaded).
-- **Text → token estimator** so the token count doesn't have to be a guess
+- [**MOSS-TTS-Local-Transformer-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) — the fast default, 48 kHz stereo, ~12 GB VRAM. Shown as “(1.7B)” in the dropdown (the weights are actually ~4.5B parameters).
+- [**MOSS-TTS-v1.5**](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (8B) — 24 kHz mono, ~22 GB VRAM, understands phonetic (IPA) spelling.
 
-The model itself is Apache-2.0 released by OpenMOSS-Team. This nodepack is MIT.
+Same nodes for both — pick the model in the Load Model dropdown.
+
+- **Speak** — text to speech without any reference; describe the voice in plain words ("male, warm, elderly narrator")
+- **Voice Clone** — any voice from a single 10–20 s reference clip, no fine-tuning
+- **Voice Continue** — keep talking in the same voice, segment after segment
+- **Set the duration** — `target_tokens` sets the length and MOSS sticks to it closely; **Estimate Tokens** computes it from your text
+- **Token pipeline** — encode a voice once, save it, and reuse it in every later run without re-encoding; listen to any token stream with Decode Tokens
+- **Offline models** — models and audio tokenizers you already have on disk are picked up from `ComfyUI/models/moss_tts`, nothing is downloaded
+- **Fine control when you need it** — repetition penalty against droning, separate samplers for pacing, a runaway cap for fixed-length output
+
+The models are Apache-2.0 by OpenMOSS-Team. This nodepack is MIT.
+
+---
+
+## Quick start
+
+1. Install (see [Installation](#installation)) and restart ComfyUI.
+2. Open ComfyUI's **Templates** browser and pick **MOSS-TTS_Full** under this pack (or drag [`example_workflows/MOSS-TTS_Full.json`](example_workflows/MOSS-TTS_Full.json) onto the canvas). It invents a voice, clones it and continues a text in it — in German.
+3. Replace the three texts with your own — the one inside **Speak** and the two text boxes — and set `language` on Speak, Voice Clone and Voice Continue. Press **Run**. The first run downloads the model (~9 GB plus ~8.5 GB for its audio tokenizer).
+
+Two rules decide whether the output sounds right — break either and you get gibberish, not an error:
+
+- **Reference audio needs ~10 s of speech or more** (10–20 s is ideal). In the example, Speak's audio *is* the reference — keep its text at three sentences or more.
+- **For Voice Continue, `previous_text` must be exactly what `previous_audio` says.** Trim the audio, trim the text.
+
+Which model? Start with the default (Local-Transformer). Take the **8B** if you have ~24 GB of VRAM and need phonetic spelling for hard words; chaining Voice Continue on the 8B needs one extra setting, see [The 8B delay seam](#the-8b-delay-seam).
 
 ---
 
 ## Requirements
 
-- ComfyUI running on a machine with a CUDA GPU. VRAM in `bfloat16`:
-  **~12 GB for the 1.7B Local-Transformer**, **~22 GB for the 8B** full model.
-- **Python**: whatever your ComfyUI already runs on.
-- `transformers` — **no version pin.** ComfyUI already ships it (`>= 4.50.3`).
-  The **Local-Transformer** loads on 4.x and 5.x: its model and audio-tokenizer
-  code fall back to the 4.x names. **The 8B needs transformers 5.x** — its
-  processor, model and tokenizer code use 5.x-only names without a fallback. On
-  4.x the loader stops with a clear message and the upgrade command. **Avoid
-  5.4.0 and 5.5.0**: they cannot read either model's audio tokenizer config (see
-  [the install gotcha](#known-install-gotcha--configuration_moss_audio_tokenizerpy-dataclass-ordering)).
-  Tested on 5.14.
-- **`flash_attn` is NOT required.** The Local-Transformer's model code defaults to `flash_attention_2`, but the loader's `attention: auto` detects whether `flash_attn` is installed and falls back to PyTorch's built-in `sdpa` if not — so a plain install runs out of the box. Install `flash-attn` only if you want that backend.
-- `torch`, `torchaudio` (whatever your ComfyUI already ships with)
-- **`torchcodec` / `soundfile` are NOT required.** torchaudio 2.9+ removed its own I/O backends and routes `torchaudio.save` / `torchaudio.load` through `torchcodec`, which raises `ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec` when it isn't installed — the state most ComfyUI venvs are in. The plugin calls neither: every audio → codes conversion runs in memory through the processor's tensor API (`encode_audios_from_wav`), which only uses `torchaudio.functional.resample`, and generated audio goes straight back out as a ComfyUI `AUDIO` dict. No temp WAV, no I/O backend, nothing to install.
-- Free disk for the auto-downloaded weights: **~9.1 GB (1.7B)** / **~17 GB (8B)** plus its audio tokenizer (**~7 GB** for the 8B, **~8.5 GB** for the 1.7B) in your Hugging Face cache — or nothing at all if you already have both on disk, see [Using a model you already downloaded](#using-a-model-you-already-downloaded)
+- A CUDA GPU with **~12 GB VRAM** for the default Local-Transformer, **~22 GB** for the 8B.
+- Disk space for the first download: **~9 GB** model + **~8.5 GB** audio tokenizer (default), or **~17 GB + ~7 GB** (8B) — nothing if you already have them, see [Using a model you already downloaded](#using-a-model-you-already-downloaded).
+- `transformers`, `torch`, `torchaudio` — whatever your ComfyUI already has. The default model runs on transformers 4.x and 5.x; **the 8B needs 5.x** (the loader tells you if yours is too old). **Avoid transformers 5.4.0 and 5.5.0** — they cannot read MOSS's audio tokenizer, see [below](#known-install-gotcha--configuration_moss_audio_tokenizerpy-dataclass-ordering).
 
-That's it — no extra CUDA extensions, no custom kernels.
+Nothing else: no `flash-attn` (optional, see below), no `torchcodec`, no custom kernels.
 
 ## Installation
+
+**ComfyUI-Manager:** search for **MOSS-TTS 1.5** (by enrico) and install it. Other packs are called "MOSS-TTS" too — check the name.
+
+**Or by hand:**
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/eehrich/ComfyUI-MOSS-TTS-1.5.git
 ```
 
-Restart ComfyUI. The first `MOSS-TTS Load Model` execution downloads the selected checkpoint into your Hugging Face cache (~9.1 GB for the 1.7B, ~17 GB for the 8B) plus its audio tokenizer (~8.5 / ~7 GB).
+Restart ComfyUI. The first run of `MOSS-TTS Load Model` downloads the selected model into your Hugging Face cache.
 
 ### Using a model you already downloaded
 
@@ -74,7 +76,7 @@ my_library:
     moss_tts: moss_tts/
 ```
 
-A folder is offered as a model when it contains a `config.json` (the file `from_pretrained` needs — weight file names differ per model). The dropdown is rebuilt on every UI refresh, so a model copied in while ComfyUI runs appears without a restart.
+A folder is offered as a model when it contains a `config.json`. The dropdown is rebuilt on every UI refresh, so a model copied in while ComfyUI runs appears without a restart.
 
 **2. Give the loader a path.** `MOSS-TTS Load Model` has an optional `model_path` input. Fill it in and it wins over the dropdown:
 
@@ -86,7 +88,7 @@ Point it at the folder that *contains* `config.json` — one level too high is t
 
 #### Don't forget the audio tokenizer
 
-The model is only half of it. Every MOSS build resolves its audio tokenizer to a **Hugging Face repo id** — the 1.7B names it in `processor_config.json`, the 8B falls back to a constant in its own remote code — so a local model on its own still pulls **7–8.5 GB** off the Hub on first load. Download it once and put it next to the model:
+The model is only half of it. MOSS loads its audio tokenizer separately, from Hugging Face, so a local model on its own still downloads **7–8.5 GB** on first use. Download the tokenizer once and put it next to the model:
 
 ```
 ComfyUI/models/moss_tts/
@@ -96,9 +98,9 @@ ComfyUI/models/moss_tts/
     MOSS-Audio-Tokenizer/             <- 24 kHz, paired automatically
 ```
 
-A folder whose `config.json` says `"model_type": "moss-audio-tokenizer"` is recognised as a tokenizer: it is **not** offered in the model dropdown, and it is paired with a local model by **sample rate** — 48 kHz model to 48 kHz tokenizer, 24 kHz to 24 kHz. That is not pedantry: the two tokenizers have the same quantiser count and codebook size, so the wrong one decodes without any error and simply produces noise. If nothing matches, the tokenizer is left to MOSS (i.e. downloaded) rather than guessed.
+Tokenizers are recognised automatically, kept out of the model dropdown and paired with a model by **sample rate** — 48 kHz model with 48 kHz tokenizer, 24 kHz with 24 kHz. The wrong one would produce noise without any error, so if nothing matches, the tokenizer is downloaded rather than guessed.
 
-Tokenizers are looked for under every `moss_tts` model folder **and right next to the model itself**, so the `model_path` route works the same way. The model's own neighbour wins if both offer a match — that is the more specific answer:
+Tokenizers are looked for in every `moss_tts` model folder **and right next to the model**, so the `model_path` route works the same way:
 
 ```
 D:/AI/models/
@@ -106,20 +108,27 @@ D:/AI/models/
     MOSS-Audio-Tokenizer/   <- found as a sibling
 ```
 
-Nothing to configure. If yours lives somewhere neither applies, the loader's `tokenizer_path` input points at it explicitly (and warns if its rate does not fit the model).
-
-For a **Hub** model the tokenizer reference is left exactly as the model ships it — no redirection, nothing changes.
+Nothing to configure. If yours lives somewhere else, point the loader's `tokenizer_path` input at it (it warns if the sample rate does not fit the model). Models picked from the Hugging Face entries of the dropdown keep using their own tokenizer.
 
 ### Known install gotcha — `configuration_moss_audio_tokenizer.py` dataclass ordering
 
-With transformers **5.4.0 and 5.5.0** — only those: 5.0–5.3 do not turn configs into dataclasses, and 5.5.1 made them keyword-only — both audio tokenizers used by MOSS v1.5 (`OpenMOSS-Team/MOSS-Audio-Tokenizer-v2` for the 1.7B Local-Transformer, `OpenMOSS-Team/MOSS-Audio-Tokenizer` for the 8B MOSS-TTS variant) declare their dataclass fields without defaults **after** the parent class already added defaulted fields, so `dataclass(...)` raises:
+Only with transformers **5.4.0 or 5.5.0**: loading fails with
 
 ```
 TypeError: non-default argument 'sampling_rate' follows default argument 'problem_type'
 ```
 
-The simplest fix is an upgrade — `python -m pip install -U "transformers>=5.5.1"` in ComfyUI's Python env; the loader's error message prints the same command. If you have to stay on 5.4.0 / 5.5.0, fix it once, after the first failed load, in the auto-downloaded file — the folder names under `transformers_modules/` depend on your transformers version — at either
-`~/.cache/huggingface/modules/transformers_modules/OpenMOSS_hyphen_Team/MOSS_hyphen_Audio_hyphen_Tokenizer_hyphen_v2/<hash>/configuration_moss_audio_tokenizer.py` (needed for the 1.7B Local-Transformer)
+(or the loader's own message saying the same). Fix: upgrade transformers in ComfyUI's Python environment —
+
+```bash
+python -m pip install -U "transformers>=5.5.1"
+```
+
+<details>
+<summary>Have to stay on 5.4.0 / 5.5.0? Patch the tokenizer config by hand</summary>
+
+After the first failed load, open the auto-downloaded file — the folder names under `transformers_modules/` depend on your transformers version — at either
+`~/.cache/huggingface/modules/transformers_modules/OpenMOSS_hyphen_Team/MOSS_hyphen_Audio_hyphen_Tokenizer_hyphen_v2/<hash>/configuration_moss_audio_tokenizer.py` (for the default model)
 or `~/.cache/huggingface/modules/transformers_modules/OpenMOSS_hyphen_Team/MOSS_hyphen_Audio_hyphen_Tokenizer/<hash>/configuration_moss_audio_tokenizer.py` (needed for the 8B MOSS-TTS)
 — give each of these class fields that the file declares a `= None` default (the 8B's tokenizer has fewer of them):
 
@@ -138,7 +147,9 @@ quantizer_type: str = None
 quantizer_kwargs: dict[str, Any] = None
 ```
 
-Nothing behavioural changes — the real defaults still come from the class's `__init__`.
+Nothing behavioural changes — the real defaults still come from the class's `__init__`. A tokenizer loaded from your own folder (`tokenizer_path`, `ComfyUI/models/moss_tts`) gets its own copy of this file, which needs the same patch.
+
+</details>
 
 ### Optional: `flash-attn` for faster attention
 
@@ -174,26 +185,25 @@ All ten nodes live under the top-level **`MOSS TTS 1.5`** category in the ComfyU
 
 <img src="assets/node-load-model.jpg" alt="MOSS-TTS Load Model node" width="420">
 
-Loads the processor + model and caches the instance in-memory across runs.
-Subsequent workflow queues re-use the already-loaded model — no re-load penalty.
+Loads the model once and keeps it in memory, so later runs start immediately.
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
-| `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` — MossTTSLocal, ~4.5B parameters (the label stays as it is: saved workflows store this exact text), **48 kHz** stereo output, ~12 GB VRAM bf16. `…MOSS-TTS-v1.5 (8B)` — MossTTSDelay, **24 kHz** mono output, ~22 GB VRAM. Same API, 31 languages, same duration semantics. Each node reads the actual sample rate from `processor.model_config.sampling_rate` at load time and stamps it on all output audio — no manual configuration needed. The `(1.7B)` / `(8B)` suffix is a UI label only; it is stripped before the HF `from_pretrained` call. Entries prefixed `local: ` are folders found under `ComfyUI/models/moss_tts` (or wherever `extra_model_paths.yaml` points that name) and are loaded straight off disk. |
-| `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable |
-| `attention` | enum | `auto` | *(optional)* Attention backend. `auto` uses `flash_attention_2` only if `flash_attn` is installed, else PyTorch `sdpa` (built-in, no extra deps). Force `sdpa`/`eager` for max compatibility, or `flash_attention_2` if you installed flash-attn. Prevents the "flash_attn is not installed" crash on fresh installs. |
+| `model_id` | enum | `…MOSS-TTS-Local-Transformer-v1.5 (1.7B)` | `…Local-Transformer-v1.5 (1.7B)` — the default: **48 kHz** stereo, ~12 GB VRAM. `…MOSS-TTS-v1.5 (8B)` — **24 kHz** mono, ~22 GB VRAM. All nodes work with both and output audio at the model's own sample rate. Entries prefixed `local: ` are model folders found under `ComfyUI/models/moss_tts` (or wherever `extra_model_paths.yaml` points that name). |
+| `device` | `cuda` \| `cpu` | `cuda` | Falls back to `cpu` when CUDA is unavailable (very slow) |
+| `attention` | enum | `auto` | *(optional)* `auto` uses `flash_attention_2` if `flash-attn` is installed, otherwise PyTorch's built-in `sdpa`. Leave it on `auto`. |
 | `model_path` | STRING | `""` | *(optional)* Load from this folder instead of the dropdown — the directory that holds `config.json`. Overrides `model_id` when set. See [Using a model you already downloaded](#using-a-model-you-already-downloaded). |
-| `tokenizer_path` | STRING | `""` | *(optional)* Folder of the MOSS audio tokenizer. Leave empty: for a local model the tokenizer matching its sample rate is taken from a `moss_tts` folder or from next to the model, and a Hub model keeps its own reference. Only needed when yours sits somewhere neither applies — without it a local model still downloads 7–8.5 GB. |
+| `tokenizer_path` | STRING | `""` | *(optional)* Folder of the MOSS audio tokenizer. Usually leave empty — a matching tokenizer in a `moss_tts` folder or next to the model is found automatically. Only needed when yours sits somewhere else. |
 
-`dtype` is picked automatically: **bfloat16 on CUDA** (MOSS's training precision — running in float32 gains no quality, running in float16 risks numerical overflow), **float32 on CPU** (bfloat16 CPU kernels are patchy).
+Precision is chosen for you (bfloat16 on GPU, float32 on CPU).
 
-**Output**: `MOSS_MODEL` — pass to any of the Speak / Voice Clone / Voice Continue / Encode Tokens / Decode Tokens nodes. One model is kept loaded at a time: loading another releases the previous one.
+**Output**: `MOSS_MODEL` — pass to any of the Speak / Voice Clone / Voice Continue / Encode Tokens / Decode Tokens nodes. One model is kept loaded at a time: loading another frees the previous one.
 
 ### `MOSS-TTS Speak`
 
 <img src="assets/node-speak.jpg" alt="MOSS-TTS Speak node" width="380">
 
-Text-to-speech with no reference audio. MOSS uses its trained no-reference path (a literal `"None"` placeholder in the prompt) and picks a voice based on `language` + `instruction`. `instruction` is your only voice-steering knob here.
+Text-to-speech with no reference audio. MOSS picks a voice from `language` and `instruction` — describe the voice you want in `instruction`.
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
@@ -204,14 +214,14 @@ Text-to-speech with no reference audio. MOSS uses its trained no-reference path 
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
 | `audio_top_k` | INT | `25` | Top-k sampling |
-| `target_tokens` | INT | `0` | Target duration in audio frames (12.5 fps). `0` = model decides via EOS. |
+| `target_tokens` | INT | `0` | Target duration in audio frames (12.5 per second). `0` = the model decides. |
 | `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames |
 | `seed` | INT | `42` | Random seed |
 | `target_overshoot_frames` | INT | `50` | Runaway cap: with `target_tokens > 0`, MOSS may run at most this many frames past it. `50` = 4 s slack. Ignored when `target_tokens = 0`. |
-| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
-| `text_temperature` | FLOAT | `1.0` | *(optional)* MOSS v1.5 is dual-stream (text + audio); this samples the **text** stream that drives alignment/pacing, separate from the acoustic `audio_temperature`. Default `1.0` — the Local-Transformer's own default; the 8B's `generate()` would use `1.5`. Lower = steadier pacing/alignment without flattening the voice. |
-| `text_top_p` | FLOAT | `1.0` | *(optional)* Nucleus (top-p) cutoff for the text stream. Default `1.0` (off). |
-| `text_top_k` | INT | `50` | *(optional)* Top-k cutoff for the text stream. Default `50`. |
+| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on repeated audio. `1.0` = off. Mild values (`1.05`–`1.15`) help against droning, tempo freeze or looping syllables; above ~`1.3` it can distort sounds that legitimately repeat. **On the 8B keep it at `1.0`** unless you hear a loop — there it also pushes away from a cloned voice. |
+| `text_temperature` | FLOAT | `1.0` | *(optional)* MOSS generates text and audio side by side; this samples the **text** side, which drives pacing. Lower = steadier pacing without flattening the voice. |
+| `text_top_p` | FLOAT | `1.0` | *(optional)* Nucleus (top-p) cutoff for the text side. Default `1.0` (off). |
+| `text_top_k` | INT | `50` | *(optional)* Top-k cutoff for the text side. Default `50`. |
 
 **Outputs**: `audio` (the model's native format: 48 kHz stereo on the Local-Transformer, 24 kHz mono on the 8B), `tokens_generated` (INT) + `tokens` (`MOSS_TOKENS` — the codes MOSS just emitted, so a voice invented here can be handed to Voice Clone / Voice Continue without ever being encoded from a WAV; see [Token pipeline (encode once)](#token-pipeline-encode-once)).
 
@@ -224,69 +234,63 @@ Generates speech from `text` in the voice of `reference_audio` — or of `refere
 | Input | Type | Default | Notes |
 |---|---|---|---|
 | `moss_model` | MOSS_MODEL | — | From the loader |
-| `reference_audio` | AUDIO | — | ComfyUI `AUDIO` type (`LoadAudio`, another node's output, etc.). Re-encoded by the codec on **every** run. **Give it ~10 s minimum** (10–20 s is the sweet spot) — a ~5 s clip does not carry enough acoustic evidence and comes back as gibberish, see [Reference rules](#reference-rules). Shown as optional only because ComfyUI cannot express "required unless that other input is wired" — ignored when `reference_tokens` is connected. |
-| `reference_tokens` | MOSS_TOKENS | — | *(optional)* Pre-encoded voice reference. Replaces `reference_audio` and skips the codec encode entirely. Same ~10 s minimum — the length rule is about acoustic evidence, not about the format. Wire it from `Encode Tokens` / `Load Tokens` / `Concat Tokens` or from another generate node's `tokens` output — see [Token pipeline (encode once)](#token-pipeline-encode-once). |
+| `reference_audio` | AUDIO | — | The voice to clone (`Load Audio`, another node's `audio`, …). **At least ~10 s of speech**, 10–20 s is ideal — shorter comes back as gibberish ([Reference rules](#reference-rules)). Wire this **or** `reference_tokens`. |
+| `reference_tokens` | MOSS_TOKENS | — | *(optional)* The same reference, already encoded — skips re-encoding it on every run. Same ~10 s minimum. From `Encode Tokens` / `Load Tokens` / `Concat Tokens` or another node's `tokens` output, see [Token pipeline](#token-pipeline-encode-once). |
 | `text` | STRING | `Hello, this is a test.` | Multiline |
 | `language` | enum | `English` | Full 31-language list: Arabic, Cantonese, Chinese, Czech, Danish, Dutch, English, Finnish, French, German, Greek, Hebrew, Hindi, Hungarian, Italian, Japanese, Korean, Macedonian, Malay, Persian (Farsi), Polish, Portuguese, Romanian, Russian, Spanish, Swahili, Swedish, Tagalog, Thai, Turkish, Vietnamese. See [MOSS README](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5) for language codes / flags. |
 | `instruction` | STRING | `""` | Optional free-form style/direction hint. **Not** a reference transcript — MOSS has no reference-text channel. |
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
 | `audio_top_k` | INT | `25` | Top-k sampling |
-| `target_tokens` | INT | `0` | Target duration in audio frames (12.5 fps → 375 ≈ 30 s, 750 ≈ 60 s). `0` = disabled, model decides via EOS. See [Duration control](#duration-control). |
-| `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames (12.5 fps) → default `4096` caps output at ~5 min. Frames on both models: the 8B spends a few steps per generation on its delay pattern, which the node adds on top. |
+| `target_tokens` | INT | `0` | Target duration in audio frames (12.5 fps → 375 ≈ 30 s, 750 ≈ 60 s). `0` = the model decides. See [Duration control](#duration-control). |
+| `max_new_tokens` | INT | `4096` | Safety cap on generated audio frames (12.5 fps) → default `4096` caps output at ~5 min. |
 | `seed` | INT | `42` | Random seed. Same seed + same inputs → identical output. |
 | `target_overshoot_frames` | INT | `50` | Runaway cap: with `target_tokens > 0`, MOSS may run at most this many frames past it. `50` = 4 s slack. Ignored when `target_tokens = 0`. |
-| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
-| `text_temperature` | FLOAT | `1.0` | *(optional)* MOSS v1.5 is dual-stream (text + audio); this samples the **text** stream that drives alignment/pacing, separate from the acoustic `audio_temperature`. Default `1.0` — the Local-Transformer's own default; the 8B's `generate()` would use `1.5`. Lower = steadier pacing/alignment without flattening the voice. |
-| `text_top_p` | FLOAT | `1.0` | *(optional)* Nucleus (top-p) cutoff for the text stream. Default `1.0` (off). |
-| `text_top_k` | INT | `50` | *(optional)* Top-k cutoff for the text stream. Default `50`. |
+| `audio_repetition_penalty`, `text_temperature`, `text_top_p`, `text_top_k` | | | *(optional)* Same as on [Speak](#moss-tts-speak). |
 
 **Outputs**:
 
-- `audio` — AUDIO at the model's native rate (48 kHz stereo on the 1.7B, 24 kHz mono on the 8B), ready for `PreviewAudio` / `SaveAudio`
+- `audio` — AUDIO at the model's native rate (48 kHz stereo on the default model, 24 kHz mono on the 8B), ready for `PreviewAudio` / `SaveAudio`
 - `tokens_generated` — INT, number of audio frames actually produced (divide by 12.5 for seconds)
-- `tokens` — `MOSS_TOKENS`, the raw codes MOSS just emitted (`[frames, n_vq]` at 12.5 fps). Feed into the next node's `reference_tokens` / `prev_tokens`, optionally through `Concat Tokens`, to keep the whole chain encode-free.
+- `tokens` — `MOSS_TOKENS`, the codes MOSS just generated. Feed into the next node's `reference_tokens` / `prev_tokens`, optionally through `Concat Tokens`, to keep the whole chain encode-free.
 
 ### `MOSS-TTS Voice Continue`
 
 <img src="assets/node-voice-continue.jpg" alt="MOSS-TTS Voice Continue node" width="380">
 
-Extends a previously generated MOSS clip. MOSS is a **prefix-continuation** model — it needs the *original text* that produced `previous_audio` so it can locate where in the script the audio stopped, then produce audio for the follow-up text. The node concatenates `previous_text + " " + text` internally and hands the full script + prior audio to MOSS. Voice is inherited from the prior audio (no separate reference). Wire `prev_tokens` instead of `previous_audio` to hand MOSS the prior segment's codes directly — no WAV round-trip, no re-encode, frame-exact prefix length.
+Continues a previous clip in the same voice. MOSS needs the **text of the previous clip** (`previous_text`) to know where it stopped, then speaks your new `text`. The voice comes from the previous audio — no separate reference. Instead of `previous_audio` you can wire `prev_tokens`, the previous segment's codes, which skips re-encoding.
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
 | `moss_model` | MOSS_MODEL | — | From the loader |
-| `previous_audio` | AUDIO | — | Prior MOSS output (typically another node's `audio` output). Re-encoded on every run. Shown as optional only because ComfyUI cannot express "required unless that other input is wired" — but still worth wiring alongside `prev_tokens` if you want the `full_audio` output, since without it there is no prior waveform to prepend. |
-| `prev_tokens` | MOSS_TOKENS | — | *(optional)* The previous segment's codes — **not** the `previous_tokens` frame *count* below. Replaces `previous_audio` for conditioning: no WAV round-trip, no re-encode, and the prefix length comes frame-exact from the tensor (`previous_tokens` is then ignored). `previous_text` must transcribe exactly what these codes contain — shorten the token stream (e.g. a sliding window) and you must shorten the transcript to the same point. Wire it from the preceding node's `tokens` output — see [Token pipeline (encode once)](#token-pipeline-encode-once). |
-| `previous_text` | STRING | `""` | **The exact text that produced `previous_audio` / `prev_tokens` — its transcript.** MOSS aligns the spoken prefix against this text to find its script position, so word-for-word match matters (punctuation included). **A mismatched pair produces gibberish, not a slightly-off voice** — if you trim the reference audio, trim this text to the same point. See [Reference rules](#reference-rules). |
-| `text` | STRING | `""` | Follow-up text to speak next. **Must be non-empty** — an empty / whitespace-only prompt raises a clear error instead of hanging (MOSS never emits EOS with nothing to say and would generate until `max_new_tokens`). |
+| `previous_audio` | AUDIO | — | The clip to continue (typically the previous node's `audio`). Wire this **or** `prev_tokens` — wire both if you want the `full_audio` output with `prev_tokens`. |
+| `prev_tokens` | MOSS_TOKENS | — | *(optional)* The previous segment's codes (its `tokens` output) instead of its audio — no re-encoding, exact length. Not the same as the `previous_tokens` number below. |
+| `previous_text` | STRING | `""` | **Exactly the text spoken in `previous_audio` / `prev_tokens`**, word for word. A mismatch produces gibberish — see [Reference rules](#reference-rules). |
+| `text` | STRING | `""` | The text to speak next. Must not be empty. |
 | `language` | enum | `English` | Same list as Voice Clone |
 | `audio_temperature` | FLOAT | `1.7` | Sampling temperature |
 | `audio_top_p` | FLOAT | `0.8` | Nucleus sampling |
 | `audio_top_k` | INT | `25` | Top-k sampling |
-| `target_tokens` | INT | `0` | Duration of the **new** segment in frames. `0` = model decides via EOS. Internally the node adds `previous_tokens` (or measured prefix) before sending to MOSS, because MOSS reads its `tokens` hint as TOTAL (prefix + new) in continuation mode. |
+| `target_tokens` | INT | `0` | Duration of the **new** segment in frames (12.5 per second). `0` = the model decides. |
 | `max_new_tokens` | INT | `4096` | Safety cap on the new segment |
 | `seed` | INT | `42` | Random seed |
 | `previous_tokens` | INT | `0` | Exact frame count of `previous_audio`. Wire the `tokens_generated` output of the upstream Speak / Voice Clone / Voice Continue node here for a precise handoff. Leave at `0` to measure from the audio duration (≤ 1 frame off due to rounding). Ignored when `prev_tokens` is wired — the code tensor already carries the exact length. |
-| `head_trim_frames` | INT | `1` | Extra frames trimmed from the START of the new audio (1 frame ≈ 80 ms at MOSS's fixed 12.5 fps, regardless of the variant's sample rate). MOSS's decoder trims the prefix by sample proportion, and its conv-based codec has a receptive field that leaks the last prefix frame into the returned continuation. Default `1` (~80 ms) removes it in most cases. Set to `0` to disable, higher if bleed persists. |
-| `target_overshoot_frames` | INT | `50` | Runaway cap: with `target_tokens > 0`, effective `max_new_tokens = min(max_new_tokens, target_tokens + this)`. `50` = 4 s slack. Ignored when `target_tokens = 0`. |
-| `audio_repetition_penalty` | FLOAT | `1.0` | *(optional)* Penalty on recently generated audio tokens. `1.0` = off. Mild values (`1.05`–`1.15`) suppress the classic AR-TTS failure modes — droning, tempo freeze, smeared/looping syllables — while leaving normal prosody untouched. Above ~`1.3` can distort legitimately repeated sounds. |
-| `text_temperature` | FLOAT | `1.0` | *(optional)* MOSS v1.5 is dual-stream (text + audio); this samples the **text** stream that drives alignment/pacing, separate from the acoustic `audio_temperature`. Default `1.0` — the Local-Transformer's own default; the 8B's `generate()` would use `1.5`. Lower = steadier pacing/alignment without flattening the voice. |
-| `text_top_p` | FLOAT | `1.0` | *(optional)* Nucleus (top-p) cutoff for the text stream. Default `1.0` (off). |
-| `text_top_k` | INT | `50` | *(optional)* Top-k cutoff for the text stream. Default `50`. |
-| `prefix_tail_trim_frames` | INT | `0` | *(optional)* **8B only.** End the prefix this many frames EARLY. `0` = off, `-1` = auto (`n_vq - 1` on the 8B, `0` on the 1.7B). Fixes the glitches in chained 8B continuation — see [The 8B delay seam](#the-8b-delay-seam). |
+| `head_trim_frames` | INT | `1` | Frames cut from the START of the new audio (1 frame = 80 ms). The first frame can carry a little of the previous clip's end; `1` removes it. `0` = off, higher if you still hear it. |
+| `target_overshoot_frames` | INT | `50` | Runaway cap: with `target_tokens > 0`, MOSS may run at most this many frames past it. `50` = 4 s slack. Ignored when `target_tokens = 0`. |
+| `audio_repetition_penalty`, `text_temperature`, `text_top_p`, `text_top_k` | | | *(optional)* Same as on [Speak](#moss-tts-speak). |
+| `prefix_tail_trim_frames` | INT | `0` | *(optional)* **8B only.** Set `-1` when chaining Voice Continue on the 8B — it removes short glitches at the joins, see [The 8B delay seam](#the-8b-delay-seam). `0` = off; on the default model `-1` does nothing. |
 
 **Outputs**:
 
 - `audio` — new segment only, head-trimmed. Use for per-segment QC / preview (you hear just the delta).
-- `tokens_generated` — INT, frames of the new segment.
-- `full_audio` — cumulative: `previous_audio + new` concatenated at the model's native sample rate (48 kHz for 1.7B, 24 kHz for 8B), always two channels (dual mono on the 8B). If `previous_audio` was at a different rate it is resampled to the target before concatenation. Wire into the NEXT Voice Continue's `previous_audio` when the same speaker keeps talking across segments — MOSS's continuation expects the full history so far.
+- `tokens_generated` — INT, frames of that `audio` (after `head_trim_frames`).
+- `full_audio` — `previous_audio` + the new segment, at the model's sample rate, always two channels (dual mono on the 8B). The merged result, and the `previous_audio` for the next segment.
 - `full_tokens` — INT, `previous_tokens + tokens_generated`. Wire into the next `previous_tokens` for a precise chain handoff.
-- `tokens` — `MOSS_TOKENS`, the raw codes of the new segment (`[frames, n_vq]` at 12.5 fps). Wire into the next Continue's `prev_tokens` (directly or through `Concat Tokens`) for an encode-free chain. Note these are the **untrimmed** codes: `head_trim_frames` only shortens the waveform, never the token tensor — see [Caveats](#caveats).
+- `tokens` — `MOSS_TOKENS`, the codes of the new segment. Wire into the next Continue's `prev_tokens` (directly or through `Concat Tokens`) for an encode-free chain. These are the **untrimmed** codes, so they are `head_trim_frames` longer than `tokens_generated` — see [Caveats](#caveats).
 
 `full_audio` / `full_tokens` need `previous_audio`: in a token-only chain (`prev_tokens` wired, no audio) there is no prior waveform in the graph, so both fall back to the new segment alone.
 
-Same-speaker chain pattern (segment-by-segment via your backend):
+Same-speaker chain, segment by segment:
 
 ```
 seg N:   Voice Continue → audio, full_audio, full_tokens
@@ -295,6 +299,8 @@ seg N+1: Voice Continue.previous_audio  <-- (seg N).full_audio
 ```
 
 Save both `audio` (for QC / retake of just this segment) and `full_audio` (as the prev handoff to the next segment). Retake with a different seed rebuilds `full_audio` from the same starting prefix.
+
+This is right for a few segments. For **long scenes**, pass only the last segment's `audio` as `previous_audio` and exactly its text as `previous_text` — the whole history costs VRAM with every segment (see [Performance & memory](#performance--memory)).
 
 ### `MOSS-TTS Estimate Tokens`
 
@@ -319,28 +325,28 @@ Turns an `AUDIO` clip into `MOSS_TOKENS` using the model's own codec — the one
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
-| `moss_model` | MOSS_MODEL | — | From the loader. The codec belongs to the model, so the codes are only valid for the variant that produced them. |
-| `audio` | AUDIO | — | Resampled to the model's native rate and loudness-normalised by the processor exactly as Voice Clone's `reference_audio` path does — the resulting codes are interchangeable with it. Two rules the clip has to satisfy, both of which produce **gibberish** when broken: at least **~10 s** long (a ~5 s clip is not enough acoustic evidence), and — if the codes later serve as a `Voice Continue` prefix — the `previous_text` you pass must transcribe **this** clip exactly. See [Reference rules](#reference-rules). |
+| `moss_model` | MOSS_MODEL | — | From the loader. Codes only work with the model that encoded them. |
+| `audio` | AUDIO | — | The clip to encode — the codes are the same as Voice Clone would make from it. Same rules as for any reference: **~10 s or more**, and if the codes become a Voice Continue prefix, `previous_text` must be exactly what this clip says ([Reference rules](#reference-rules)). |
 
-**Outputs**: `tokens` (`MOSS_TOKENS`, `[frames, n_vq]`) + `frames` (INT; divide by 12.5 for seconds).
+**Outputs**: `tokens` (`MOSS_TOKENS`) + `frames` (INT; divide by 12.5 for seconds).
 
 ### `MOSS-TTS Decode Tokens`
 
 <img src="assets/node-decode-tokens.jpg" alt="MOSS-TTS Decode Tokens node" width="380">
 
-The inverse of `Encode Tokens`: sends `MOSS_TOKENS` back through the model's own vocoder and returns a plain ComfyUI `AUDIO` dict. It completes the token API (encode / **decode** / concat / save / load) and makes a token stream *auditable* — hear what a saved token file actually contains, what reference window a `Concat Tokens` result really builds, or what a `tokens` output sounds like, all **without generating anything**. Worth a listen before a long batch: a reference that sounds wrong here will clone wrong.
+The inverse of `Encode Tokens`: turns `MOSS_TOKENS` back into audio. Use it to hear what a saved token file contains, what a `Concat Tokens` window really holds, or what a `tokens` output sounds like — **without generating anything**. Worth a listen before a long batch: a reference that sounds wrong here will clone wrong.
 
-Decoding is a pure codec pass — no sampling, no seed, deterministic.
+Decoding involves no sampling — the same codes always give the same audio.
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
-| `moss_model` | MOSS_MODEL | — | From the loader. The vocoder is part of the model, so decode with the variant that produced the codes (`n_vq` is validated and a mismatch raises an explicit error). It also sets the output sample rate: 48 kHz for the 1.7B, 24 kHz for the 8B. |
-| `tokens` | MOSS_TOKENS | — | Codes to turn back into audio, `[frames, n_vq]` at 12.5 fps. Any `MOSS_TOKENS` source: `Encode` / `Concat` / `Load Tokens`, or a generate node's `tokens` output. |
-| `return_stereo` | BOOLEAN | `true` | *(optional)* Passed straight to the processor's `decode_audio_codes(return_stereo=…)`. `true` (default) keeps the codec's native **stereo** — identical to what every generate node in this pack outputs, so a decoded `tokens` output lines up with its own `audio`. `false` averages the codec channels into one mono channel: smaller, but no longer bit-identical to the generate nodes' audio. Local-Transformer only — the 8B's codec is mono and has no such switch. |
+| `moss_model` | MOSS_MODEL | — | From the loader. The vocoder is part of the model, so decode with the model that produced the codes (a mix-up stops with a clear error). It also sets the output sample rate: 48 kHz for the default model, 24 kHz for the 8B. |
+| `tokens` | MOSS_TOKENS | — | Codes to turn back into audio. Any `MOSS_TOKENS` source: `Encode` / `Concat` / `Load Tokens`, or a generate node's `tokens` output. |
+| `return_stereo` | BOOLEAN | `true` | *(optional)* Default model only (the 8B is always mono). `true` keeps stereo, exactly like the generate nodes' `audio`; `false` mixes down to mono. |
 
 **Outputs**: `audio` (AUDIO at the model's native rate) + `frames` (INT, the number of code frames decoded; divide by 12.5 for seconds).
 
-Under the hood this is exactly the call the processor makes behind `processor.decode()` (`_parse_audio_codes` → `decode_audio_codes`), minus the prompt-row segmentation and the `start_length` trim — so decoding a node's `tokens` output reproduces the `audio` it was emitted with. Note the untrimmed-codes caveat below if you compare it byte-for-byte against a `Voice Continue` segment.
+Decoding a node's `tokens` output gives back the `audio` it was generated with (for Voice Continue: plus the `head_trim_frames` the audio lost, see [Caveats](#caveats)).
 
 ### `MOSS-TTS Concat Tokens`
 
@@ -355,7 +361,7 @@ Joins two to four token streams along the time axis. Built for sliding-window re
 | `tokens_c` | MOSS_TOKENS | — | *(optional)* Appended after `tokens_b`. |
 | `tokens_d` | MOSS_TOKENS | — | *(optional)* Appended after `tokens_c`. |
 
-All inputs must come from the same model — `n_vq` is validated and a mismatch raises with an explicit message.
+All inputs must come from the same model — a mix-up stops with a clear error.
 
 **Outputs**: `tokens` (concatenated codes) + `frames` (INT total; `frames / 12.5` = seconds, handy for keeping a sliding window inside a duration budget).
 
@@ -370,9 +376,9 @@ Writes `MOSS_TOKENS` to ComfyUI's output directory and returns the absolute path
 | `tokens` | MOSS_TOKENS | — | Codes to persist, e.g. from `Encode Tokens` or a generate node's `tokens` output |
 | `filename_prefix` | STRING | `moss_tokens/voice` | Path prefix inside ComfyUI's output directory. Subfolders are created automatically, a counter and `.moss_tokens.pt` are appended: `moss_tokens/voice` → `output/moss_tokens/voice_00001_.moss_tokens.pt` |
 
-File format: a `torch.save` of a plain dict `{format, format_version, audio_codes [frames, n_vq], frames, n_vq, frames_per_second}` — tensors and scalars only, so it loads back with `weights_only=True` (no pickled code, which matters for a file type that travels between machines).
+Load Tokens reads only numbers and refuses anything else, so a token file from someone else cannot run code on your machine.
 
-This is an output node: the path is also reported in the ComfyUI UI and can be read back from `/history`, so an HTTP-driven pipeline can encode the base voice in one prompt and reference the file in every later one.
+The path is also shown in the ComfyUI UI and returned by the API (`/history`), so an HTTP-driven pipeline can encode the base voice in one prompt and load the file in every later one.
 
 **Output**: `path` (STRING, absolute).
 
@@ -385,13 +391,11 @@ Reads a token file written by `Save Tokens` back into `MOSS_TOKENS`.
 | Input | Type | Default | Notes |
 |---|---|---|---|
 | `path` | dropdown | first entry | **File picker.** Lists every `.moss_tokens.pt` found in ComfyUI's **input** and **output** directory, scanned recursively (`Save Tokens` writes into a subfolder by default). Entries from the output directory carry an `output/` prefix, so identical basenames in both directories stay apart. Files written after the page was loaded show up on reload. |
-| `path_override` | STRING | `""` | *(optional)* Explicit path; when non-empty it **replaces** the dropdown selection. Relative to the input directory (output directory as fallback) or absolute. A dropdown cannot accept a link — this can: convert it to an input and wire the `path` output of `Save Tokens` into it to load in a later run what an earlier one wrote. Also the field to fill from an HTTP-driven pipeline. |
+| `path_override` | STRING | `""` | *(optional)* Explicit path; when non-empty it **replaces** the dropdown selection. Relative to the input directory (output directory as fallback) or absolute. Wire the `path` output of `Save Tokens` into it to load what an earlier run wrote. |
 
 When neither directory holds a token file yet, the dropdown shows a single `(no token files found)` entry; running with it selected fails with an explicit message instead of a confusing "file not found" — use `path_override`, or run `Save Tokens` once and reload.
 
-Everything is loaded with `weights_only=True`. The node re-runs when the file's timestamp/size changed, not merely when the path string did — so overwriting a token file does invalidate the cached result. That applies to whichever of the two inputs actually won.
-
-Workflows saved before `path` became a dropdown keep working: the value sits in the same widget slot and is resolved exactly as it was before (input dir, then output dir, absolute as-is), even when it is not one of the listed entries.
+Overwriting a token file is noticed: the node loads it again on the next run.
 
 **Outputs**: `tokens` (`MOSS_TOKENS`) + `frames` (INT).
 
@@ -399,7 +403,7 @@ Workflows saved before `path` became a dropdown keep working: the value sits in 
 
 ## Reference rules
 
-Two hard constraints on the *reference* side, both found in live testing. Break either and the output is **gibberish** — not a weaker or slightly-off voice, but unusable audio. Neither raises an error, so if a run comes back as garbled speech, check these first.
+Two hard constraints on the *reference* side. Break either and the output is **gibberish** — not a weaker or slightly-off voice, but unusable audio. Neither raises an error, so if a run comes back as garbled speech, check these first.
 
 **1. The reference text must transcribe the reference audio.**
 MOSS aligns the spoken reference against its transcript to locate its position in the script. Hand it a pair that does not describe the same speech and the alignment is meaningless — the model produces gibberish. In this nodepack the pair is `Voice Continue`'s `previous_text` ↔ `previous_audio` / `prev_tokens`.
@@ -415,7 +419,7 @@ Typical ways to break it:
 `Voice Clone` has **no** reference-transcript channel at all (`instruction` is a style hint, not a transcript), so this rule only concerns the continuation path — but it applies to *any* reference audio/text pair you build on top of these nodes.
 
 **2. A too-short reference produces gibberish too.**
-The model needs enough acoustic evidence to lock onto a voice. **~5 s is not enough** — aim for **at least ~10 s**, with 10–20 s the sweet spot. This applies identically to `reference_audio` and to pre-encoded `reference_tokens` / `prev_tokens` (~125 frames ≈ 10 s at 12.5 fps): the constraint is about the amount of speech, not the format. Very long references work fine quality-wise but cost VRAM in the KV cache — see [Performance & memory](#performance--memory).
+The model needs enough acoustic evidence to lock onto a voice. **~5 s is not enough** — aim for **at least ~10 s**, with 10–20 s the sweet spot. This applies identically to `reference_audio` and to pre-encoded `reference_tokens` / `prev_tokens` (~125 frames ≈ 10 s at 12.5 fps): the constraint is about the amount of speech, not the format. Very long references work fine but cost VRAM — see [Performance & memory](#performance--memory).
 
 `Decode Tokens` is the cheap way to check the first half of a pair: listen to the reference the workflow *actually* assembled before spending a batch on it.
 
@@ -423,40 +427,30 @@ The model needs enough acoustic evidence to lock onto a voice. **~5 s is not eno
 
 ## The 8B delay seam
 
-Chaining `Voice Continue` on the **8B** produces short glitches — clipped or smeared syllables, a word that dissolves — while the same chain on the 1.7B is clean. It is not sampling luck and not a bad seed: it is a structural property of the 8B's code layout, and one input fixes it.
+Chaining `Voice Continue` on the **8B** can produce short glitches right after each join — a clipped or smeared syllable, a word that dissolves. The default model does not have this problem.
 
-The 8B (`MossTTSDelay`) writes its codes in a **delay pattern**: codebook *c* is offset by *c* rows, so a block of `T` frames occupies `T + n_vq - 1` rows. For a continuation the processor cuts the last `n_vq - 1` rows off the prefix (`delay_audio_codes_list[-1][:-(n_vq-1), :]`) so the model resumes *mid-diagonal*. The consequence: the last **31** frames of the prefix arrive without their fine codebooks, and the model has to re-invent detail for audio that is already fixed. The codec is not memoryless, so a wrong guess bleeds into frames that were supposed to be settled. Those same last frames are also the *run-out* of the utterance — the quietest, least constrained part of the signal.
+**Fix: set `prefix_tail_trim_frames` to `-1`** on every Voice Continue that runs on the 8B.
 
-`prefix_tail_trim_frames` ends the prefix before that seam. Measured against the reference implementation (identical text, seeds and sampling; judged by ear):
+Why: the 8B stores its audio codes staggered, so the last ~2.5 s of the previous clip reach the model incomplete and it has to guess them again. `-1` ends the prefix just before that part (31 frames) — the value that tested best.
 
-| Trim | Result |
-|---|---|
-| `0` (default) | glitches, clearly worse than the reference |
-| `16` / `30` / `32` / `48` | worse than 31 |
-| **`31`** (= `n_vq - 1`) | **on par with the reference implementation** |
+**What it costs:** MOSS re-speaks those ~2.5 s before continuing, so each new `audio` starts with the end of the previous clip, and `full_audio` contains it twice. Cut that repeat in an audio editor before joining the clips — `head_trim_frames` only goes up to 0.8 s, too short for this.
 
-A **one-frame-wide optimum at exactly `n_vq - 1`**. Set the input to `31`, or to `-1` to have the node read `n_vq` off the loaded model.
-
-**What it costs.** `previous_text` deliberately stays whole, so MOSS re-speaks the trimmed ~2.5 s before continuing. That repeat is in the `audio` output *and* in `tokens`, which means `full_audio` (and a `Concat Tokens` chain) contains the overlap **twice**. Cut it before chaining — raise `head_trim_frames`, or trim downstream where you can see the waveform. The node deliberately does not guess where the echo ends: it is a fresh generation, not a copy, so its length only approximates the trim.
-
-**On the 1.7B there is nothing to do.** `MossTTSLocal` has no delay pattern, hence no seam; the same trim sweep (0/6/12/25 frames) was audibly indistinguishable. Leave it at `0` — `-1` resolves to `0` there anyway.
-
-Even with the trim, chained 8B continuation still shows the occasional short error — the reference implementation shows them too, so that residue is the model, not this nodepack.
+On the default model there is nothing to do: `-1` does nothing there. Even with the trim, a chained 8B continuation shows an occasional short error — that is the model.
 
 ---
 
 ## Pronunciation control (IPA)
 
-You can spell a word phonetically and MOSS will say it that way — but **only on the 8B**, and only if the surrounding text is long enough. Both halves of that sentence were found by testing; neither is in the upstream docs.
+You can spell a word phonetically and MOSS will say it that way — but **only on the 8B**, and only if the surrounding text is long enough.
 
-**Model support (measured, German text):**
+**Model support:**
 
 | Model | Inline IPA | Whole-sentence IPA |
 |---|---|---|
 | `MOSS-TTS-v1.5` (8B) | **yes** | **yes** |
-| `MOSS-TTS-Local-Transformer-v1.5` (1.7B) | no | no |
+| `MOSS-TTS-Local-Transformer-v1.5` (default) | no | no |
 
-The 1.7B reads the slashes as characters — `/veːk/` comes out as something like "fek". No amount of text length changes that.
+The default model reads the slashes as characters — `/veːk/` comes out as something like "fek". No amount of text length changes that.
 
 **The trap: too-short text.** With only a sentence or two, voice cloning does not engage properly, and IPA appears not to work *even on the 8B*. Such a test makes the model look unable to do IPA. Give it several sentences before judging. This is the same minimum-length effect described under [Reference rules](#reference-rules), now on the *text* side.
 
@@ -467,28 +461,25 @@ Er ging den /veːk/ entlang.          # inline — one word corrected, rest norm
 /eːɐ̯ ɡɪŋ deːn veːk ɛntˈlaŋ/          # whole sentence in slashes
 ```
 
-Inline is the useful one: it fixes a single stubborn word while leaving the model's own prosody in charge of everything else. It is also the form the upstream README never shows — its single IPA example is English and covers the whole utterance.
+Inline is the useful one: it fixes a single stubborn word while leaving the model's own prosody in charge of everything else.
 
 **What this is good for.** Some mispronunciations are not random. Compound nouns, loanwords and words whose stress depends on meaning (German `der Weg` /veːk/ vs. `weg` /vɛk/) get read the same wrong way on every retry, so regenerating with a new seed does not help. A phonetic spelling fixes those deterministically. Orthographic respelling ("Lihra" for "Lyra") does **not** work — MOSS ignores it.
 
-**Caveat — bare digits.** In testing, `Test 12345` was spoken as "1212455" and was followed by an invented sentence. Write numbers out (`zwölftausend…`) rather than feeding raw digit strings.
+**Caveat — bare digits** can be misread (`12345` came out as "1212455"). Write numbers out (`zwölftausend…`).
 
 ---
 
 ## Token pipeline (encode once)
 
-`MOSS_TOKENS` is this pack's own type: a `torch.LongTensor` of shape `[frames, n_vq]` holding **raw MOSS audio codes** at MOSS's fixed 12.5 frames per second — one row is 80 ms of audio, regardless of the model's sample rate.
+MOSS turns audio into **codes** (`MOSS_TOKENS` in this pack: 12.5 frames per second, one frame = 80 ms) before it can use it as a voice reference, and it generates codes, too. The token nodes let you keep those codes:
 
-Two properties of MOSS v1.5 make that directly usable:
-
-- The Hugging Face processor accepts such a tensor **anywhere it accepts a WAV path** (`_resolve_audio_items` in `processing_moss_tts.py` takes a `torch.Tensor` as codes verbatim).
-- `generate()` **emits** codes in exactly that layout — on the 8B once its delay pattern is resolved, which the nodes do for you.
-
-So a voice reference can be encoded **once** and reused forever, and a generated segment can be fed straight back in without ever becoming a WAV. What disappears is the codec encode at the front of every subsequent request.
+- encode a voice reference **once**, save it, and reuse it in every later run — no re-encoding;
+- feed a generated segment straight into the next one without ever turning it into a WAV;
+- listen to any code stream with `Decode Tokens`.
 
 ### Why it matters
 
-Generation parallelises well across concurrent requests. The reference encode does not — it is one codec pass per request, and it is the part of a cloned request that does not scale. With a short 10–20 s reference that is noise. With a **70–90 s reference window** (e.g. a sliding window over a long narration) it can dominate the call: measured **~24 s of encode at concurrency 8 on an RTX 5090**, while generation itself kept scaling fine. Pre-encoded tokens remove that whole term — the request starts at generation.
+Encoding a reference takes time on every run — with a long reference (a minute or more, e.g. a sliding window over a narration) several seconds, and it does not get faster when you run many requests at once. Encoding it once removes that step.
 
 ### Encode once, chain tokens
 
@@ -513,7 +504,7 @@ every run:
 
 1. **Encode once** — run `Encode Tokens` on the base voice clip, and `Save Tokens` if it should survive a restart. An HTTP-driven pipeline saves in one prompt and just runs `Load Tokens` in every later one. In the UI, pick the file from `Load Tokens`' dropdown (a fresh save shows up after a page reload); over HTTP, put the path into `path_override`.
 2. **Build the reference** — `Concat Tokens` with the base anchor as `tokens_a` and the most recent segment(s) after it.
-3. **Generate** — wire the result into `Voice Clone.reference_tokens` (or `Voice Continue.prev_tokens`) and leave the corresponding audio input unwired.
+3. **Generate** — wire the result into `Voice Clone.reference_tokens` (or `Voice Continue.prev_tokens`) — the audio input can then stay unwired (on Voice Continue, wire it only if you want `full_audio`).
 4. **Chain** — take that node's `tokens` output as the "recent segment" input of the next `Concat Tokens`. Nothing in the loop touches the codec again.
 
 `Speak` emits `tokens` too, so even a reference-free voice invented on the fly enters the chain without a WAV round-trip.
@@ -522,21 +513,19 @@ Every link in that loop can be **auditioned**: hang a `Decode Tokens` → `Previ
 
 ### Caveats
 
-- **A trimmed reference needs a trimmed transcript.** MOSS aligns the spoken reference against its text, so **the reference text must transcribe the reference audio — if you trim the audio, trim the transcript to the same point.** Cutting a token stream (the whole point of a sliding window: drop the oldest frames, append the newest segment) while `Voice Continue`'s `previous_text` still carries the full history is exactly this mistake, and it does not degrade gracefully: the output is **gibberish**, not a slightly-off voice. Same for pasting the wrong paragraph. `Concat Tokens` cannot check this for you — it only sees codes. Keep the text window and the token window in lockstep, and use `Decode Tokens` to hear what the reference actually became. See [Reference rules](#reference-rules).
-- **A too-short reference is gibberish, not a weaker clone.** Pre-encoded tokens do not change how much speech MOSS needs to lock onto a voice: **~5 s is not enough**, give it **~10 s minimum** (≈ 125 frames at 12.5 fps; `frames / 12.5` = seconds on every token node's `frames` output). A sliding window that shrinks below that floor starts producing garbage even though every node in the chain reports success.
-- **`head_trim_frames` does not apply to tokens.** Voice Continue's `tokens` output are the raw emitted codes and cover the **untrimmed** segment — the code path is already frame-exact, while the audio path can only cut by sample proportion, which is what `head_trim_frames` (default `1` ≈ 80 ms) compensates on the waveform. If audio and tokens have to line up 1:1, set `head_trim_frames = 0`. Do **not** trim the previous token tensor to match the trimmed audio — that removes real prefix state MOSS needs.
+- **A trimmed token stream needs a trimmed `previous_text`.** When a sliding window with `Concat Tokens` drops old frames, drop their words from the text too — `Concat Tokens` only sees codes and cannot check it. See [Reference rules](#reference-rules).
+- **Tokens need the same ~10 s as audio** (~125 frames; `frames / 12.5` = seconds on every token node). A sliding window that shrinks below that produces gibberish.
+- **`head_trim_frames` does not apply to tokens.** Voice Continue's `tokens` output holds the whole new segment; only the `audio` loses its first `head_trim_frames` (default `1` = 80 ms). If audio and tokens have to line up 1:1, set `head_trim_frames = 0`. Do **not** cut the tokens to match the trimmed audio — MOSS needs them whole as the next prefix.
 - **`full_audio` / `full_tokens` still need `previous_audio`.** With only `prev_tokens` wired there is no prior waveform in the graph, so those two outputs fall back to the new segment alone. Chain `Concat Tokens` on the `tokens` output if you want the cumulative *code* stream.
-- **Loudness normalisation differs subtly** between token-concat and WAV-concat. `Encode Tokens` normalises each clip on its own (exactly as the reference path does), so concatenating two token streams keeps two independently normalised parts, whereas concatenating the WAVs first and encoding once normalises the whole thing together. Both work; the levels are not bit-identical.
-- **Tokens are model-specific.** The 1.7B Local-Transformer and the 8B model need not share an RVQ depth; `n_vq` is validated whenever tokens are used and a mismatch fails with an explicit error. Re-encode the reference when switching between the two.
-- **8B token files written before 0.6.1 are rejected — re-generate them.** Until 0.6.1 the `tokens` output handed out the 8B's rows still in the [delay pattern](#the-8b-delay-seam), including its pad cells (496 of them at `n_vq = 32`). Fed back through `Concat Tokens` / `Load Tokens` those hit index 1024 in the codec's 1024-entry embedding table: `IndexError`, chain dead. They were also incompatible with `Encode Tokens`, which always produced the resolved representation. Since 0.6.1 both produce the same thing and a file that still carries pad values fails with an explanatory message instead. The **audio** output was never affected, and the 1.7B never was either.
-- **`Load Tokens` path resolution**: the `path` dropdown lists both ComfyUI directories, output-dir entries prefixed `output/` (that prefix is resolved in the output directory first). Any other value — a dropdown-less string from an older workflow, or `path_override` — resolves against the input directory first, then the output directory; absolute paths are used as-is. An HTTP-driven pipeline that does not want to care about the dropdown should just set `path_override`.
+- **Loudness:** `Encode Tokens` normalises each clip on its own, so two concatenated token streams can differ slightly in level from one WAV made of both. Both work.
+- **Tokens are model-specific.** Codes from the default model do not work with the 8B and vice versa — a mix-up stops with a clear error. Re-encode the reference when you switch models.
 - **No network paths in path inputs (Windows).** `path_override`, `model_path`, `tokenizer_path` and Save Tokens' `filename_prefix` refuse UNC paths (`\\host\share\…`): Windows would hand that host your NTLM hash as soon as the path is touched, and a shared workflow must not be able to do that. A share mapped to a drive letter works, and so does a path inside ComfyUI's own input/output directory, which may itself be a share.
 
 ---
 
 ## Duration control
 
-MOSS's `build_user_message` accepts a `tokens` field (in audio frames, 12.5 fps). Empirically **MOSS obeys this precisely** — same text with `target_tokens = 100, 200, 400` produces audio of roughly `8, 16, 32 s`. This nodepack exposes it as `target_tokens` on `Speak`, `Voice Clone` and `Voice Continue`.
+`target_tokens` on `Speak`, `Voice Clone` and `Voice Continue` sets the length of the speech in frames (12.5 per second), and **MOSS sticks to it** — the same text with `100`, `200`, `400` comes out at roughly 8, 16 and 32 s.
 
 Practical uses:
 
@@ -545,7 +534,7 @@ Practical uses:
 - **Fixed video/audio slots**: your video shot is 8 s → set `target_tokens = 100`. MOSS fits into that slot.
 - **Continuation length steering**: `Voice Continue.target_tokens = 375` → about 30 s of extra audio.
 
-`max_new_tokens` is a separate parameter — a hard cap in frames. On the Local-Transformer it is MOSS's own `frame_budget`; the 8B spends one step per row, and the node adds the fixed rows of its delay pattern (`n_vq + 2`, on Voice Continue `n_vq + 1`) on top, so the number means frames on both. Keep it comfortably above `target_tokens` as a runaway fuse; the default `4096` (~5 min at 12.5 fps) is usually plenty.
+`max_new_tokens` is something else: a hard safety cap in frames, on both models. Keep it comfortably above `target_tokens`; the default `4096` (~5 min) is usually plenty. With a `target_tokens` set, `target_overshoot_frames` (default 50 = 4 s) additionally stops a run that overshoots the target.
 
 ---
 
@@ -553,12 +542,12 @@ Practical uses:
 
 ### Full pipeline — Speak → Clone → Continue (downloadable)
 
-The bundled [`example_workflows/MOSS-TTS_Full.json`](example_workflows/MOSS-TTS_Full.json) wires the whole chain end to end (ComfyUI-Manager also lists it under this pack's example workflows). Drop the JSON on the ComfyUI canvas — or **Workflow → Open** — to load it, then swap the two `Text (Multiline)` nodes (`String (Multiline)` in older ComfyUI) for your own text; everything else is pre-wired.
+The bundled [`example_workflows/MOSS-TTS_Full.json`](example_workflows/MOSS-TTS_Full.json) wires the whole chain end to end. Open it from ComfyUI's **Templates** browser (listed under this pack) or drop the JSON on the canvas. It is set up in German: replace the text inside **Speak** and the two `Text (Multiline)` boxes (`String (Multiline)` in older ComfyUI), and set `language` on the three MOSS nodes. Everything else is pre-wired.
 
 ![Full MOSS-TTS pipeline](assets/workflow-full.jpg)
 
 1. **Load Model** once, fanned out to all three generators.
-2. **Speak** synthesizes a fresh voice from a short seed line (no reference) → *Preview: Voice*.
+2. **Speak** invents a voice from a seed text of three sentences (no reference) → *Preview: Voice*. Its audio becomes the clone's reference, so keep that text at 10 s of speech or more.
 3. **Voice Clone** takes that audio as `reference_audio` and narrates segment 1 in the same voice; an **Estimate Tokens** node sets its duration → *Preview: Seg 1*. Its `tokens_generated` is wired forward as the exact prefix length.
 4. **Voice Continue** takes the clone's `audio` + `tokens_generated` and narrates segment 2 — inheriting the voice and continuing the script → *Preview: Seg 2*. Its `full_audio` output is the merged single-take result → *Preview: Merged*.
 
@@ -613,89 +602,48 @@ Same audio reference, same seed, same text — but 40% slower / more dramatic. O
                              [Save Audio (part 2 only)]
 ```
 
-Route both the audio and the `tokens_generated` from the upstream node — the token count keeps the prefix length exact (no rounding drift). Voice Clone / Speak / Voice Continue all expose `tokens_generated` for this. Voice Continue sees `part 1 text` as the "you already said this" context, and adds `previous_tokens` to `target_tokens` internally before sending MOSS the total-length hint.
+Route both the audio and the `tokens_generated` from the upstream node — the frame count keeps the prefix length exact. Voice Continue reads `part 1 text` as "already said" and speaks `part 2 text`.
 
-For part 3, feed `part 1 + part 2` as the new `previous_text`, wire Voice Continue's own outputs forward, and so on.
+For part 3, feed `part 1 + part 2` as the new `previous_text`, wire Voice Continue's own outputs forward, and so on — for long scenes see [Performance & memory](#performance--memory).
 
 The same chain runs **encode-free** if you route the upstream `tokens` output (`MOSS_TOKENS`) into `prev_tokens` instead of routing the audio — see [Token pipeline (encode once)](#token-pipeline-encode-once).
-
-**Or as a standalone Python demo** (what the nodes wrap under the hood):
-
-```python
-from transformers import AutoModel, AutoProcessor
-import torch, torchaudio
-
-processor = AutoProcessor.from_pretrained(
-    "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",
-    trust_remote_code=True,
-)
-processor.audio_tokenizer = processor.audio_tokenizer.to("cuda")
-
-model = AutoModel.from_pretrained(
-    "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",
-    trust_remote_code=True,
-    dtype=torch.bfloat16,
-).to("cuda")
-
-conv = [processor.build_user_message(
-    text="Der Wind hörte auf, noch bevor Tessa Brandt den Grund der Senke erreichte.",
-    reference=["voice.wav"],
-    language="German",
-    tokens=125,   # ~10 s target
-)]
-batch = processor([conv], mode="generation")
-out = model.generate(
-    input_ids=batch["input_ids"].to("cuda"),
-    attention_mask=batch["attention_mask"].to("cuda"),
-    max_new_tokens=4096,
-    audio_temperature=1.7, audio_top_p=0.8, audio_top_k=25,
-)
-audio = processor.decode(out)[0].audio_codes_list[0]
-torchaudio.save("out.wav", audio.cpu(), 48000)
-```
-
-Note that this raw-API demo uses the processor's **file** path (`reference=["voice.wav"]`, `torchaudio.save`) and therefore needs a working torchaudio I/O backend — on torchaudio 2.9+ that means `torchcodec` installed. The nodes themselves never take that route (see [Requirements](#requirements)): they hand the processor waveform tensors and get code tensors back.
 
 ---
 
 ## Performance & memory
 
-Figures below are for the **1.7B Local-Transformer** (the default), single-turn 75-character German sentence, RTX 5090 (bf16). The **8B** model loads a larger checkpoint (~17 GB) and needs ~22 GB VRAM, so both load and generation are correspondingly slower.
+Figures below are for the default model (Local-Transformer), a 75-character German sentence, RTX 5090. The **8B** model loads a larger checkpoint (~17 GB) and needs ~22 GB VRAM, so both load and generation are correspondingly slower.
 
-| Phase | Time (1.7B) |
+| Phase | Time (default model) |
 |---|---|
-| Processor load (audio tokenizer moved to GPU) | ~21 s |
-| Model load (9.1 GB checkpoint → GPU) | ~16 s |
+| Audio tokenizer load | ~21 s |
+| Model load | ~16 s |
 | Generation (4.72 s of audio) | **~2.7 s** |
 
-Load happens once per model; loading a different model (or switching `attention` / `tokenizer_path`) releases the previous one — also while ComfyUI still caches the old loader's output; a node that is handed that output later loads its model again. Warm-cache generation is real-time on modern hardware.
+A model is loaded once and then stays in memory; switching to another model (or another `attention` / `tokenizer_path`) frees the previous one first, so two never share your VRAM. Once loaded, generation runs faster than real time on modern hardware.
 
-VRAM: ~12 GB active weight + activations in `bfloat16` for the 1.7B (measured on RTX 5090), ~22 GB for the 8B. Peak spikes with long contexts (e.g. very long text or `max_new_tokens=16384`) can push higher. On the 1.7B an RTX 3090 (24 GB) has comfortable headroom; the 8B wants a 24 GB card with little else resident.
+VRAM: ~12 GB for the default model, ~22 GB for the 8B. Very long texts or references push it higher. For the default model a 24 GB card has comfortable headroom; the 8B wants a 24 GB card with little else resident.
 
-**Reference / prev_audio adds runtime VRAM on top of the 12 GB baseline.** Voice Clone's `reference_audio` and Voice Continue's `previous_audio` are encoded to audio codes by the tokenizer, then held in the transformer's KV cache while the new frames are generated. The overhead scales linearly with the prefix duration:
+**References cost VRAM.** Whatever MOSS continues from — `reference_audio`, `previous_audio` or their tokens — stays in memory while it generates: about **1 GB per ~20 s** of reference (measured on the default model, similar on the 8B).
 
-- Measured: **~1 GB extra VRAM per ~20 s of prefix audio** on the Local-Transformer, similar order of magnitude on the 8B
-
-Practical implications:
-
-- **Very long reference audio** (e.g. a 2-minute calibration clip) at Voice Clone time can add several GB before generation even starts. Keep reference clips in the 10–20 s sweet spot — long enough for the model to lock onto the voice (below ~10 s it returns gibberish, see [Reference rules](#reference-rules)), short enough to stay cheap.
-- **Pre-encoded `reference_tokens` / `prev_tokens` save the encode, not the cache.** They remove the codec pass ([Token pipeline](#token-pipeline-encode-once)) — the prefix still enters the KV cache frame for frame, so the VRAM math above is unchanged. A long token reference costs exactly as much memory as the same reference as audio.
-- **Voice Continue with a growing history** (chaining segment N as the prefix for segment N+1 with cumulative audio) is the biggest failure mode: VRAM drifts up linearly through a scene and eventually OOMs. If you are chaining segments, pass only the **last** segment's audio as `previous_audio` rather than the concatenation of the whole scene so far — **and cut `previous_text` down to exactly that segment's text.** Audio and text must describe the same speech, otherwise the output turns to gibberish (see [Reference rules](#reference-rules)). With both trimmed, continuation works as before, just with a shorter history.
-- Watch `nvidia-smi` during a long Continue chain to spot the drift early; a single-segment prefix stays flat at ~12 GB + a few hundred MB.
+- **Keep references at 10–20 s.** A 2-minute clip adds several GB before generation even starts.
+- **Tokens save the encoding, not the memory** — a token reference costs as much VRAM as the same audio.
+- **Don't let the history grow.** Chaining whole scenes as `previous_audio` adds VRAM with every segment until it runs out. Pass only the **last** segment's audio — **and cut `previous_text` to exactly that segment's text**, or the output turns to gibberish (see [Reference rules](#reference-rules)).
+- Watch `nvidia-smi` during a long chain; with a single-segment prefix it stays flat.
 
 ---
 
 ## Troubleshooting
 
-- **Output is gibberish / Kauderwelsch — reference text and reference audio do not match.** MOSS aligns the spoken reference against its transcript; a pair that does not describe the same speech makes the alignment meaningless and the model emits garbage rather than a degraded-but-usable voice. **Rule: the reference text must transcribe the reference audio — if you trim the audio, trim the transcript to the same point.** In this nodepack that pair is `Voice Continue`'s `previous_text` ↔ `previous_audio` / `prev_tokens`. Classic causes: a shortened reference WAV (or a `Concat Tokens` sliding window) whose transcript was left at full length, and the wrong paragraph pasted into `previous_text`. Nothing raises — the check is on you. Decode the reference with `Decode Tokens` and read `previous_text` alongside it. See [Reference rules](#reference-rules).
-- **Output is gibberish — the reference is too short.** Same symptom, different cause: below roughly **10 s** of reference the model has too little acoustic evidence to lock onto the voice. A ~5 s clip reliably produces gibberish. Use **10–20 s** for `reference_audio` / `reference_tokens` (≈ 125–250 frames at 12.5 fps). Very long references are fine for quality but cost VRAM — see [Performance & memory](#performance--memory).
+- **Output is gibberish — `previous_text` does not match the previous audio.** Usually a shortened clip or token window whose text was left at full length, or the wrong paragraph. Listen to the prefix with `Decode Tokens` and read `previous_text` next to it. See [Reference rules](#reference-rules).
+- **Output is gibberish — the reference is too short.** Below ~10 s MOSS cannot lock onto the voice; use 10–20 s.
 - **`AttributeError: module 'transformers.processing_utils' has no attribute 'MODALITY_TO_BASE_CLASS_MAPPING'` (suggests `AUTO_TO_BASE_CLASS_MAPPING`)**: you are on transformers 4.x and loading a model whose code needs 5.x — the **8B** always, the Local-Transformer only in an old cached build. Upgrade transformers in ComfyUI's Python env: `python -m pip install -U "transformers>=5.5.1"` (needs Python 3.10+). The loader's own error message prints the same command.
 - **`TypeError: non-default argument 'sampling_rate' follows default argument …`**: transformers 5.4.0 or 5.5.0 — upgrade as above, or see [the install gotcha](#known-install-gotcha--configuration_moss_audio_tokenizerpy-dataclass-ordering).
-- **Voice Continue shows shifted values after an update (e.g. `audio_repetition_penalty` below its minimum, `text_top_k` = 1)**: the workflow was saved with a pre-release build of the 0.6 branch (0.6.1–0.6.3), where `prefix_tail_trim_frames` sat in the middle of the node. It now sits at the end, so that workflows saved with the released 0.5.x keep loading unchanged. Re-enter that node's values once, or replace the node — also when nothing is rejected: `prefix_tail_trim_frames` then silently holds 50, which cuts 4 s off the prefix.
+- **Voice Continue shows odd values after an update (e.g. `audio_repetition_penalty` below its minimum, `text_top_k` = 1, `prefix_tail_trim_frames` = 50)**: only workflows saved with a 0.6.1–0.6.3 test build of this pack are affected; workflows from the regular 0.5.x releases load unchanged. Re-enter that node's values once, or replace the node.
 - **`Can't load the model … pytorch_model.bin`**: your model.safetensors download stalled. Re-run `huggingface_hub.hf_hub_download(repo_id=..., filename=...)` for the file that stalled — `model.safetensors` for the Local-Transformer, one of the `model-0000N-of-00004.safetensors` shards for the 8B. Often caused by low disk space in `~/.cache/huggingface`.
 - **`std::bad_alloc` on `import torchcodec`**: your installed `torchcodec` version was compiled against a different torch. Either install the torchcodec version that matches your torch (see [torchcodec's compatibility table](https://github.com/pytorch/torchcodec#installing-torchcodec)) or `pip uninstall torchcodec`. The MOSS pipeline itself does **not** require torchcodec.
-- **`ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec`**: an **outdated copy of this nodepack**. Older versions wrote the reference/previous audio to a temp WAV, which torchaudio 2.9+ can only do through `torchcodec`. Pull the current version — the nodes convert audio to codes in memory now and never call `torchaudio.save`/`load` (see [Requirements](#requirements)). Nothing to install.
-- **It downloads anyway, although the model is on disk.** The model is only half of the install — MOSS fetches its audio tokenizer separately, by repo id. On a successful local load the log says `[MOSS-TTS] using local audio tokenizer '…' (48000 Hz)`. If it says `none of the local audio tokenizers matches this model's … Hz` instead, the one you have belongs to the other model: **`MOSS-Audio-Tokenizer-v2` (48 kHz) goes with the 1.7B, `MOSS-Audio-Tokenizer` (24 kHz) with the 8B.** Nothing is guessed there on purpose — the wrong codec decodes without an error and produces noise.
+- **`ImportError: TorchCodec is required for save_with_torchcodec / load_with_torchcodec`**: an outdated copy of this nodepack — update it. The current version needs no `torchcodec`.
+- **It downloads anyway, although the model is on disk.** The model is only half of the install — MOSS fetches its audio tokenizer separately. On a successful local load the log says `[MOSS-TTS] using local audio tokenizer '…' (48000 Hz)`. If it says `none of the local audio tokenizers matches this model's … Hz` instead, the one you have belongs to the other model: **`MOSS-Audio-Tokenizer-v2` (48 kHz) goes with the default model, `MOSS-Audio-Tokenizer` (24 kHz) with the 8B.** The wrong one would produce noise, so nothing is guessed.
 - **No `local: …` entries in the dropdown.** The folder must contain `config.json` *directly* — a Hugging Face snapshot nested one level deeper is not seen. A repo cloned without Git LFS *is* listed (its small `config.json` is a real file) but fails to load — the weights are only pointers; fetch them with `git lfs pull`. The list is rebuilt on every UI refresh, so reload the browser rather than restarting ComfyUI. If nothing helps, `model_path` bypasses the dropdown entirely and its error message says what it did find.
 - **Pause markers like `[pause 1.2s]`**: the 8B's model card documents inline `[pause X.Ys]` markers as supported. There is no parser in the code — it is learned behaviour, so treat the length as approximate. The Local-Transformer documents no such marker. For guaranteed gaps, generate separate clips and join them with a silence spacer in ComfyUI, or chain `Voice Continue`.
 

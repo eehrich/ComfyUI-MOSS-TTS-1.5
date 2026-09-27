@@ -2229,9 +2229,10 @@ class MOSSVoiceContinue:
                             "FULL prefix, so MOSS re-speaks the trimmed "
                             "~2.5 s at the start of the new segment. That "
                             "overlap is in 'audio' AND 'tokens', so "
-                            "'full_audio' contains it twice -- cut it (raise "
-                            "head_trim_frames, or trim downstream) before "
-                            "chaining. On the 1.7B there is no delay pattern "
+                            "'full_audio' contains it twice -- cut it "
+                            "downstream before chaining (head_trim_frames "
+                            "stops at 10 frames, too short for this). On the "
+                            "1.7B there is no delay pattern "
                             "and no measurable gain: leave it at 0."
                         ),
                     },
