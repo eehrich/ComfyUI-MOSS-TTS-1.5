@@ -1,11 +1,13 @@
 {
-  "_comment": "Widget order of every node as released on main (0.5.13). ComfyUI restores saved widget values by POSITION, so each list must stay a prefix of the node's current widgets -- new inputs are appended, never inserted. Extend a list only when a release ships.",
-  "released": "0.5.13",
+  "_comment": "Widget order of every node as released on main (0.6.4). ComfyUI restores saved widget values by POSITION, so each list must stay a prefix of the node's current widgets -- new inputs are appended, never inserted. Extend a list only when a release ships.",
+  "released": "0.6.4",
   "nodes": {
     "MOSSLoadModel": [
       "model_id",
       "device",
-      "attention"
+      "attention",
+      "model_path",
+      "tokenizer_path"
     ],
     "MOSSSpeak": [
       "text",
@@ -55,11 +57,24 @@
       "audio_repetition_penalty",
       "text_temperature",
       "text_top_p",
-      "text_top_k"
+      "text_top_k",
+      "prefix_tail_trim_frames"
     ],
     "MOSSEstimateTokens": [
       "text",
       "words_per_minute"
+    ],
+    "MOSSEncodeTokens": [],
+    "MOSSDecodeTokens": [
+      "return_stereo"
+    ],
+    "MOSSConcatTokens": [],
+    "MOSSSaveTokens": [
+      "filename_prefix"
+    ],
+    "MOSSLoadTokens": [
+      "path",
+      "path_override"
     ]
   }
 }

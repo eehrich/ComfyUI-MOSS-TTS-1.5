@@ -72,7 +72,7 @@ Sharing one model library between several ComfyUI installs is what `extra_model_
 
 ```yaml
 my_library:
-    base_path: D:/AI/models
+    base_path: /path/to/your/models   # your own folder, e.g. D:/models on Windows
     moss_tts: moss_tts/
 ```
 
@@ -81,7 +81,7 @@ A folder is offered as a model when it contains a `config.json`. The dropdown is
 **2. Give the loader a path.** `MOSS-TTS Load Model` has an optional `model_path` input. Fill it in and it wins over the dropdown:
 
 ```
-D:/AI/models/MOSS-TTS-v1.5
+/path/to/your/models/MOSS-TTS-v1.5
 ```
 
 Point it at the folder that *contains* `config.json` — one level too high is the usual mistake, and the error message says so and lists what it did find.
@@ -103,7 +103,7 @@ Tokenizers are recognised automatically, kept out of the model dropdown and pair
 Tokenizers are looked for in every `moss_tts` model folder **and right next to the model**, so the `model_path` route works the same way:
 
 ```
-D:/AI/models/
+/path/to/your/models/
     MOSS-TTS-v1.5/          <- model_path points here
     MOSS-Audio-Tokenizer/   <- found as a sibling
 ```
