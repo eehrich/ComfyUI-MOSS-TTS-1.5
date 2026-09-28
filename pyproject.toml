@@ -4,7 +4,7 @@ description = "ComfyUI custom nodes for OpenMOSS MOSS-TTS v1.5 — both the Loca
 version = "0.6.4"
 authors = [
   { name = "Enrico Ehrich" },
-  { name = "Claude Opus 4.8 (Anthropic)", email = "noreply@anthropic.com" },
+  { name = "Claude", email = "noreply@anthropic.com" },
 ]
 license = { file = "LICENSE" }
 dependencies = [
